@@ -26,6 +26,39 @@ from search_engine import SearchIndex
  
 st.set_page_config(page_title="Technical Manual Search", page_icon="🔧", layout="wide")
  
+# ---------------------------------------------------------------------------
+# Look and feel. The color palette itself lives in .streamlit/config.toml
+# (Streamlit's own [theme] section -- the supported way to theme buttons,
+# inputs, etc. so it keeps working across Streamlit upgrades). This block
+# only adds the handful of things that theming alone can't do: a nicer
+# font, and some polish on elements this file builds directly (so there's
+# no risk of it fighting Streamlit's own internals if they change).
+# ---------------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif; }
+ 
+    .stButton > button, .stDownloadButton > button {
+        border-radius: 8px;
+        font-weight: 500;
+        transition: transform 0.05s ease-in-out;
+    }
+    .stButton > button:active, .stDownloadButton > button:active {
+        transform: scale(0.98);
+    }
+    .stTextInput input, div[data-baseweb="select"] > div {
+        border-radius: 8px !important;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 12px !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+ 
  
 # ---------------------------------------------------------------------------
 # Shared index: one instance for the whole running app (all users share the
@@ -128,12 +161,13 @@ def _highlight(snippet: str, terms: list) -> str:
 # certificate hassle required.
 # ---------------------------------------------------------------------------
 _VOICE_HTML = """
-<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;">
-  <button id="micBtn" style="padding:8px 16px;border-radius:8px;border:none;
-    background:#5b5bd6;color:white;font-size:14px;cursor:pointer;">
+<div style="font-family:'Inter',-apple-system,Segoe UI,Roboto,sans-serif;">
+  <button id="micBtn" style="padding:9px 18px;border-radius:999px;border:none;
+    background:#6366F1;color:white;font-size:14px;font-weight:500;cursor:pointer;
+    box-shadow:0 1px 3px rgba(99,102,241,0.4);">
     🎤 Speak your query
   </button>
-  <div id="voiceStatus" style="margin-top:6px;font-size:13px;color:#555;"></div>
+  <div id="voiceStatus" style="margin-top:8px;font-size:13px;color:#6b7280;"></div>
 </div>
 <script>
 const btn = document.getElementById('micBtn');
@@ -176,10 +210,38 @@ if (!SR) {
 # ---------------------------------------------------------------------------
 # Header + search
 # ---------------------------------------------------------------------------
-st.title("🔧 Technical Manual Search")
-st.caption(
-    "Search across every service manual in the shared library, by keyword or by voice. "
-    f"Storage: {'Google Drive' if store.mode == 'drive' else 'local (dev mode, no Drive configured)'}"
+st.markdown(
+    """
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:2px;">
+      <div style="width:48px;height:48px;border-radius:12px;background:#EEF0FF;
+        display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0;">
+        🔧
+      </div>
+      <div>
+        <div style="font-size:28px;font-weight:700;color:#1E2233;line-height:1.2;">
+          Technical Manual Search
+        </div>
+        <div style="font-size:14px;color:#6b7280;">
+          Search across every service manual in the shared library, by keyword or by voice.
+        </div>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+storage_ok = store.mode == "drive"
+st.markdown(
+    f"""
+    <div style="display:inline-flex;align-items:center;gap:6px;margin:10px 0 18px 0;
+      padding:3px 10px;border-radius:999px;font-size:12px;font-weight:500;
+      background:{'#ECFDF5' if storage_ok else '#FFF7ED'};
+      color:{'#047857' if storage_ok else '#C2410C'};">
+      <span style="width:7px;height:7px;border-radius:50%;
+        background:{'#10B981' if storage_ok else '#F97316'};"></span>
+      Storage: {'Google Drive' if storage_ok else 'local (dev mode, no Drive configured)'}
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
  
 voice_query = st.query_params.get("voice_query", "")
@@ -232,9 +294,22 @@ if query.strip():
                     st.write("📄")
             with c2:
                 score_pct = round(hit["score"] * 100)
+                if score_pct >= 70:
+                    badge_bg, badge_fg = "#ECFDF5", "#047857"
+                elif score_pct >= 40:
+                    badge_bg, badge_fg = "#FFFBEB", "#B45309"
+                else:
+                    badge_bg, badge_fg = "#F3F4F6", "#4B5563"
                 st.markdown(
-                    f"**{hit['filename']}** — page {hit['page_number']}"
-                    f"&nbsp;&nbsp;·&nbsp;&nbsp;Match: **{score_pct}%**"
+                    f"<div style='font-size:15px;'>"
+                    f"<span style='font-weight:600;'>{html.escape(hit['filename'])}</span>"
+                    f" — page {hit['page_number']}"
+                    f"&nbsp;&nbsp;"
+                    f"<span style='background:{badge_bg};color:{badge_fg};"
+                    f"padding:2px 10px;border-radius:999px;font-size:12px;"
+                    f"font-weight:600;'>{score_pct}% match</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
                 )
                 st.markdown(_highlight(hit["snippet"], hit["highlight_terms"]))
                 btn1, btn2 = st.columns([1, 1])
@@ -416,7 +491,4 @@ with st.expander(f"📚 Document library ({len(docs)} files)"):
                 )
             else:
                 st.rerun()
- 
-
-
  
