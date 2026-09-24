@@ -56,7 +56,7 @@ class SearchIndex:
         )
         self.matrix = self.vectorizer.fit_transform(texts)
  
-    def add_document(self, doc_id: str, filename: str, chunks: list):
+    def add_document(self, doc_id: str, filename: str, chunks: list, category: str = "Uncategorized"):
         if not chunks:
             return 0
         with self._lock:
@@ -69,6 +69,7 @@ class SearchIndex:
                         "filename": filename,
                         "page_number": c["page_number"],
                         "text": c["text"],
+                        "category": category,
                     }
                 )
             self.records = new_records
@@ -106,10 +107,35 @@ class SearchIndex:
         with self._lock:
             seen = {}
             for r in self.records:
-                seen[r["doc_id"]] = r["filename"]
-            return [{"doc_id": k, "filename": v} for k, v in seen.items()]
+                seen[r["doc_id"]] = {
+                    "filename": r["filename"],
+                    "category": r.get("category", "Uncategorized"),
+                }
+            return [
+                {"doc_id": k, "filename": v["filename"], "category": v["category"]}
+                for k, v in seen.items()
+            ]
  
-    def search(self, query: str, top_k: int = 8, doc_id: str = None):
+    def set_category(self, doc_id: str, category: str):
+        """Re-tags every chunk of an already-uploaded document. Used by the
+        library management UI to categorize documents that were uploaded
+        before categories existed, or to correct a mis-tagged one. Only
+        metadata changes, so there's no need to rebuild the TF-IDF matrix
+        afterwards -- just persist the updated records."""
+        with self._lock:
+            previous_records = self.records
+            new_records = [
+                {**r, "category": category} if r["doc_id"] == doc_id else r
+                for r in self.records
+            ]
+            self.records = new_records
+            try:
+                self._save()
+            except Exception:
+                self.records = previous_records
+                raise
+ 
+    def search(self, query: str, top_k: int = 8, doc_id: str = None, category: str = None):
         with self._lock:
             if self.vectorizer is None or self.matrix is None:
                 return []
@@ -120,6 +146,12 @@ class SearchIndex:
  
             if doc_id:
                 mask = np.array([r["doc_id"] == doc_id for r in self.records])
+                sims = np.where(mask, sims, -1.0)
+ 
+            if category and category != "All categories":
+                mask = np.array(
+                    [r.get("category", "Uncategorized") == category for r in self.records]
+                )
                 sims = np.where(mask, sims, -1.0)
  
             # A single page can be split into several overlapping chunks
@@ -157,7 +189,9 @@ class SearchIndex:
                         "snippet": r["text"],
                         "score": float(sims[i]),
                         "highlight_terms": highlight_terms,
+                        "category": r.get("category", "Uncategorized"),
                     }
                 )
             return hits
  
+
