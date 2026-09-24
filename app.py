@@ -68,6 +68,35 @@ def _render_thumbnail(_store, file_id: str, page_number: int) -> bytes:
         doc.close()
  
  
+@st.cache_data(show_spinner=False, max_entries=50, ttl=3600)
+def _render_page_image(_store, file_id: str, page_number: int) -> bytes:
+    """A larger, actually-readable render of one page.
+ 
+    The first version of "Preview this page" embedded the whole PDF as a
+    base64 data: URI inside an iframe (st.components.v1.html) so the
+    browser's own PDF viewer could jump to the right page. That worked
+    for small files, but for a large manual (tens of MB, the same file
+    Google Drive's own preview refused to open for being "too large") the
+    encoded page just rendered blank -- almost certainly hitting a size
+    ceiling either in the browser's data: URI handling or in Streamlit's
+    component message size. Rendering only the *one requested page* as an
+    image sidesteps that completely: its size depends only on that page's
+    content, never on how large or how many pages the source PDF has.
+    """
+    import pymupdf as fitz
+ 
+    data = _download_bytes(_store, file_id)
+    doc = fitz.open(stream=data, filetype="pdf")
+    try:
+        page = doc[page_number - 1]
+        # Higher resolution than the thumbnail -- meant to actually be
+        # read, not just recognized at a glance.
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+        return pix.tobytes("png")
+    finally:
+        doc.close()
+ 
+ 
 def _highlight(snippet: str, terms: list) -> str:
     escaped = html.escape(snippet)
     terms = sorted({t for t in terms if len(t) > 1}, key=len, reverse=True)
@@ -258,19 +287,13 @@ if query.strip():
  
                 if st.session_state.get(pv_ready_key):
                     try:
-                        pdf_bytes = _download_bytes(store, hit["doc_id"])
+                        page_img = _render_page_image(
+                            store, hit["doc_id"], hit["page_number"]
+                        )
                     except Exception as e:
                         st.error(f"Couldn't load preview: {e}")
                     else:
-                        import base64
- 
-                        b64 = base64.b64encode(pdf_bytes).decode()
-                        st.components.v1.html(
-                            f'<iframe src="data:application/pdf;base64,{b64}'
-                            f'#page={hit["page_number"]}" width="100%" '
-                            'height="650" style="border:none;"></iframe>',
-                            height=670,
-                        )
+                        st.image(page_img, use_container_width=True)
 else:
     st.caption("Type a query above, or tap the mic and speak.")
  
