@@ -212,17 +212,25 @@ if query.strip():
                     # file.
                     dl_ready_key = f"dlready_{hit['doc_id']}_{hit['page_number']}_{result_index}"
                     if st.session_state.get(dl_ready_key):
-                        pdf_bytes = _download_bytes(store, hit["doc_id"])
-                        st.download_button(
-                            "⬇️ Save PDF",
-                            data=pdf_bytes,
-                            file_name=hit["filename"],
-                            mime="application/pdf",
-                            # result_index guards against any future
-                            # duplicate (doc_id, page_number) pair still
-                            # producing a clash.
-                            key=f"dl_{hit['doc_id']}_{hit['page_number']}_{result_index}",
-                        )
+                        try:
+                            pdf_bytes = _download_bytes(store, hit["doc_id"])
+                        except Exception as e:
+                            # A Drive API call that still fails after its
+                            # built-in retries shouldn't take down the
+                            # whole page for every result -- show it
+                            # inline and let the person try again.
+                            st.error(f"Couldn't fetch this file: {e}")
+                        else:
+                            st.download_button(
+                                "⬇️ Save PDF",
+                                data=pdf_bytes,
+                                file_name=hit["filename"],
+                                mime="application/pdf",
+                                # result_index guards against any future
+                                # duplicate (doc_id, page_number) pair
+                                # still producing a clash.
+                                key=f"dl_{hit['doc_id']}_{hit['page_number']}_{result_index}",
+                            )
                     else:
                         if st.button(
                             "⬇️ Download PDF",
@@ -275,19 +283,36 @@ with st.expander(f"📚 Document library ({len(docs)} files)"):
                     "PDF, which needs OCR before it can be indexed (not enabled here)."
                 )
             else:
-                file_id = store.upload_bytes(uploaded.name, data)
-                chunks = chunk_pages(pages)
-                index.add_document(file_id, uploaded.name, chunks)
-                st.session_state.last_uploaded_signature = signature
-                st.session_state.uploader_key += 1
-                st.success(f"Indexed {uploaded.name} ({len(pages)} pages).")
-                st.rerun()
+                try:
+                    file_id = store.upload_bytes(uploaded.name, data)
+                    chunks = chunk_pages(pages)
+                    index.add_document(file_id, uploaded.name, chunks)
+                except Exception as e:
+                    # Same reasoning as the delete button below: don't
+                    # let a transient Drive API hiccup crash the whole
+                    # app for everyone -- show it and let them retry.
+                    st.error(
+                        f"Upload failed: {e}. This is usually a brief "
+                        "network hiccup talking to Google Drive -- try again."
+                    )
+                else:
+                    st.session_state.last_uploaded_signature = signature
+                    st.session_state.uploader_key += 1
+                    st.success(f"Indexed {uploaded.name} ({len(pages)} pages).")
+                    st.rerun()
  
     for d in docs:
         row1, row2 = st.columns([5, 1])
         row1.write(d["filename"])
         if row2.button("Delete", key=f"del_{d['doc_id']}"):
-            index.remove_document(d["doc_id"])
-            store.delete_file(d["doc_id"])
-            st.rerun()
+            try:
+                index.remove_document(d["doc_id"])
+                store.delete_file(d["doc_id"])
+            except Exception as e:
+                st.error(
+                    f"Couldn't delete {d['filename']}: {e}. This is usually "
+                    "a brief network hiccup talking to Google Drive -- try again."
+                )
+            else:
+                st.rerun()
  
