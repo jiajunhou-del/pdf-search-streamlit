@@ -1,4 +1,3 @@
-
 """
 File storage backend for the search app.
  
@@ -46,6 +45,10 @@ except ImportError:  # pragma: no cover - only relevant when unit testing
  
 INDEX_FILENAME = "search_index.pkl"
 LOCAL_CACHE_DIR = os.path.join(os.path.dirname(__file__), "local_drive_cache")
+# Per-user History/Favorites files (see user_data.py) share this prefix so
+# list_files() can filter them out of the Document library alongside the
+# search index -- neither is a manual someone uploaded.
+USER_DATA_PREFIX = "userdata__"
  
  
 def _has_drive_secrets() -> bool:
@@ -71,7 +74,7 @@ class LocalStore:
     def list_files(self):
         out = []
         for name in os.listdir(LOCAL_CACHE_DIR):
-            if name == INDEX_FILENAME:
+            if name == INDEX_FILENAME or name.startswith(USER_DATA_PREFIX):
                 continue
             out.append({"id": name, "name": name})
         return out
@@ -92,14 +95,24 @@ class LocalStore:
             os.remove(path)
  
     def load_index_bytes(self):
-        path = self._path(INDEX_FILENAME)
+        return self.load_named_bytes(INDEX_FILENAME)
+ 
+    def save_index_bytes(self, data: bytes):
+        self.save_named_bytes(INDEX_FILENAME, data)
+ 
+    def load_named_bytes(self, name: str):
+        """Generic single-file read/write, reused for the search index and
+        for the small per-user History/Favorites JSON blobs (user_data.py)
+        -- both are just "one named file in the same folder", so there's no
+        need for a separate storage mechanism."""
+        path = self._path(name)
         if not os.path.exists(path):
             return None
         with open(path, "rb") as f:
             return f.read()
  
-    def save_index_bytes(self, data: bytes):
-        with open(self._path(INDEX_FILENAME), "wb") as f:
+    def save_named_bytes(self, name: str, data: bytes, mimetype: str = None):
+        with open(self._path(name), "wb") as f:
             f.write(data)
  
  
@@ -160,7 +173,9 @@ class DriveStore:
             q=q, fields="files(id, name)", spaces="drive", pageSize=1000
         ).execute(num_retries=3)
         return [
-            f for f in res.get("files", []) if f["name"] != INDEX_FILENAME
+            f for f in res.get("files", [])
+            if f["name"] != INDEX_FILENAME
+            and not f["name"].startswith(USER_DATA_PREFIX)
         ]
  
     def upload_bytes(self, filename: str, data: bytes) -> str:
@@ -188,22 +203,32 @@ class DriveStore:
         self.service.files().delete(fileId=file_id).execute(num_retries=3)
  
     def load_index_bytes(self):
-        file_id = self._find(INDEX_FILENAME)
+        return self.load_named_bytes(INDEX_FILENAME)
+ 
+    def save_index_bytes(self, data: bytes):
+        self.save_named_bytes(INDEX_FILENAME, data)
+ 
+    def load_named_bytes(self, name: str):
+        """Generic single-file read/write, reused for the search index and
+        for the small per-user History/Favorites JSON blobs (user_data.py)
+        -- both are just "one named file in the same folder", so there's no
+        need for a separate storage mechanism."""
+        file_id = self._find(name)
         if not file_id:
             return None
         return self.download_bytes(file_id)
  
-    def save_index_bytes(self, data: bytes):
+    def save_named_bytes(self, name: str, data: bytes, mimetype: str = "application/octet-stream"):
         from googleapiclient.http import MediaIoBaseUpload
  
-        media = MediaIoBaseUpload(io.BytesIO(data), mimetype="application/octet-stream")
-        existing_id = self._find(INDEX_FILENAME)
+        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype)
+        existing_id = self._find(name)
         if existing_id:
             self.service.files().update(
                 fileId=existing_id, media_body=media
             ).execute(num_retries=3)
         else:
-            meta = {"name": INDEX_FILENAME, "parents": [self.folder_id]}
+            meta = {"name": name, "parents": [self.folder_id]}
             self.service.files().create(
                 body=meta, media_body=media
             ).execute(num_retries=3)
