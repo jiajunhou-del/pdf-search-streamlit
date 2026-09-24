@@ -175,18 +175,36 @@ if query.strip():
                 except Exception:
                     st.write("📄")
             with c2:
-                st.markdown(f"**{hit['filename']}** — page {hit['page_number']}")
-                st.markdown(_highlight(hit["snippet"], hit["highlight_terms"]))
-                pdf_bytes = _download_bytes(store, hit["doc_id"])
-                st.download_button(
-                    "Open / download PDF",
-                    data=pdf_bytes,
-                    file_name=hit["filename"],
-                    mime="application/pdf",
-                    # result_index guards against any future duplicate
-                    # (doc_id, page_number) pair still producing a clash.
-                    key=f"dl_{hit['doc_id']}_{hit['page_number']}_{result_index}",
+                score_pct = round(hit["score"] * 100)
+                st.markdown(
+                    f"**{hit['filename']}** — page {hit['page_number']}"
+                    f"&nbsp;&nbsp;·&nbsp;&nbsp;Match: **{score_pct}%**"
                 )
+                st.markdown(_highlight(hit["snippet"], hit["highlight_terms"]))
+                btn1, btn2 = st.columns([1, 1])
+                with btn1:
+                    if store.mode == "drive":
+                        # Google Drive's own PDF viewer honors a #page=N URL
+                        # fragment, so this opens straight to the matching
+                        # page in a new tab instead of forcing a download.
+                        preview_url = (
+                            f"https://drive.google.com/file/d/{hit['doc_id']}"
+                            f"/view#page={hit['page_number']}"
+                        )
+                        st.link_button("👀 Preview this page", preview_url)
+                    else:
+                        st.caption("Preview needs Drive storage — use download.")
+                with btn2:
+                    pdf_bytes = _download_bytes(store, hit["doc_id"])
+                    st.download_button(
+                        "⬇️ Download PDF",
+                        data=pdf_bytes,
+                        file_name=hit["filename"],
+                        mime="application/pdf",
+                        # result_index guards against any future duplicate
+                        # (doc_id, page_number) pair still producing a clash.
+                        key=f"dl_{hit['doc_id']}_{hit['page_number']}_{result_index}",
+                    )
 else:
     st.caption("Type a query above, or tap the mic and speak.")
  
@@ -248,3 +266,4 @@ with st.expander(f"📚 Document library ({len(docs)} files)"):
             store.delete_file(d["doc_id"])
             st.rerun()
  
+
