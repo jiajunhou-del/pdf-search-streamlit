@@ -42,12 +42,19 @@ index = get_index()
 store = index.store
  
  
-@st.cache_data(show_spinner=False)
+# Community Cloud's free tier caps this whole process at ~1GB RAM, and
+# every distinct PDF ever opened by any user was being kept in memory
+# forever (st.cache_data has no eviction by default) -- with enough
+# different manuals opened across a session or two, that alone was enough
+# to blow the limit. max_entries + ttl bound how many full PDFs stay
+# cached at once, evicting the least-recently-used ones instead of
+# growing without limit.
+@st.cache_data(show_spinner=False, max_entries=25, ttl=3600)
 def _download_bytes(_store, file_id: str) -> bytes:
     return _store.download_bytes(file_id)
  
  
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=50, ttl=3600)
 def _render_thumbnail(_store, file_id: str, page_number: int) -> bytes:
     import pymupdf as fitz
  
@@ -195,16 +202,34 @@ if query.strip():
                     else:
                         st.caption("Preview needs Drive storage — use download.")
                 with btn2:
-                    pdf_bytes = _download_bytes(store, hit["doc_id"])
-                    st.download_button(
-                        "⬇️ Download PDF",
-                        data=pdf_bytes,
-                        file_name=hit["filename"],
-                        mime="application/pdf",
-                        # result_index guards against any future duplicate
-                        # (doc_id, page_number) pair still producing a clash.
-                        key=f"dl_{hit['doc_id']}_{hit['page_number']}_{result_index}",
-                    )
+                    # Every displayed result used to eagerly download its
+                    # full PDF just to have the bytes ready for this
+                    # button -- for up to 8 results on every single
+                    # search, whether or not anyone actually wanted to
+                    # download them. That was the main driver of the
+                    # memory blowup. Now the bytes are only fetched once
+                    # someone actually asks to download that specific
+                    # file.
+                    dl_ready_key = f"dlready_{hit['doc_id']}_{hit['page_number']}_{result_index}"
+                    if st.session_state.get(dl_ready_key):
+                        pdf_bytes = _download_bytes(store, hit["doc_id"])
+                        st.download_button(
+                            "⬇️ Save PDF",
+                            data=pdf_bytes,
+                            file_name=hit["filename"],
+                            mime="application/pdf",
+                            # result_index guards against any future
+                            # duplicate (doc_id, page_number) pair still
+                            # producing a clash.
+                            key=f"dl_{hit['doc_id']}_{hit['page_number']}_{result_index}",
+                        )
+                    else:
+                        if st.button(
+                            "⬇️ Download PDF",
+                            key=f"dlprep_{hit['doc_id']}_{hit['page_number']}_{result_index}",
+                        ):
+                            st.session_state[dl_ready_key] = True
+                            st.rerun()
 else:
     st.caption("Type a query above, or tap the mic and speak.")
  
@@ -266,4 +291,3 @@ with st.expander(f"📚 Document library ({len(docs)} files)"):
             store.delete_file(d["doc_id"])
             st.rerun()
  
-
