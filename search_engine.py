@@ -60,6 +60,7 @@ class SearchIndex:
         if not chunks:
             return 0
         with self._lock:
+            previous_records = self.records
             new_records = list(self.records)
             for c in chunks:
                 new_records.append(
@@ -71,14 +72,34 @@ class SearchIndex:
                     }
                 )
             self.records = new_records
-            self._save()
+            try:
+                self._save()
+            except Exception:
+                # _save() talks to Google Drive over the network, and
+                # that call can fail partway (a transient SSL/timeout
+                # error, observed in production). If it does, self.records
+                # was already reassigned above but self.matrix never gets
+                # rebuilt to match it -- and that mismatch is exactly what
+                # produced repeated "IndexError: list index out of range"
+                # crashes on every search afterwards, for the rest of
+                # this process's life. Rolling records back to what
+                # self.matrix still agrees with (and re-raising so the
+                # caller sees the failure and can retry) keeps the index
+                # internally consistent even when the save didn't happen.
+                self.records = previous_records
+                raise
             self._rebuild()
         return len(chunks)
  
     def remove_document(self, doc_id: str):
         with self._lock:
+            previous_records = self.records
             self.records = [r for r in self.records if r["doc_id"] != doc_id]
-            self._save()
+            try:
+                self._save()
+            except Exception:
+                self.records = previous_records
+                raise
             self._rebuild()
  
     def list_documents(self):
@@ -115,6 +136,14 @@ class SearchIndex:
                     break
                 if len(hits) >= top_k:
                     break
+                if i >= len(self.records):
+                    # Defensive only -- add_document/remove_document now
+                    # roll back on a failed save specifically so records
+                    # and matrix can't drift apart, but this costs
+                    # nothing and means a search degrades gracefully
+                    # instead of crashing the page if that invariant is
+                    # ever violated some other way.
+                    continue
                 r = self.records[i]
                 page_key = (r["doc_id"], r["page_number"])
                 if page_key in seen_pages:
