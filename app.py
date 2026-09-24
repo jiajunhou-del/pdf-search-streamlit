@@ -37,22 +37,41 @@ st.set_page_config(page_title="Technical Manual Search", page_icon="🔧", layou
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600;700&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif; }
  
-    .stButton > button, .stDownloadButton > button {
-        border-radius: 8px;
-        font-weight: 500;
-        transition: transform 0.05s ease-in-out;
+    /* Buttons, downloads, and links read like console controls: sharp
+       corners, thin amber-tinted border, uppercase monospace label --
+       consistent with the rest of the "instrument panel" look instead of
+       Streamlit's default soft rounded buttons. */
+    .stButton > button, .stDownloadButton > button, .stLinkButton > a {
+        border-radius: 4px;
+        border: 1px solid rgba(245,166,35,0.35);
+        font-family: 'IBM Plex Mono', monospace;
+        font-weight: 600;
+        font-size: 13px;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        transition: border-color 0.1s ease-in-out, transform 0.05s ease-in-out;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover, .stLinkButton > a:hover {
+        border-color: #F5A623;
     }
     .stButton > button:active, .stDownloadButton > button:active {
         transform: scale(0.98);
     }
     .stTextInput input, div[data-baseweb="select"] > div {
-        border-radius: 8px !important;
+        border-radius: 4px !important;
     }
     div[data-testid="stVerticalBlockBorderWrapper"] {
-        border-radius: 12px !important;
+        border-radius: 4px !important;
+    }
+    /* Expander headers (Document library) get the same console treatment. */
+    [data-testid="stExpander"] summary {
+        font-family: 'IBM Plex Mono', monospace;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        font-size: 13px;
     }
     </style>
     """,
@@ -161,13 +180,15 @@ def _highlight(snippet: str, terms: list) -> str:
 # certificate hassle required.
 # ---------------------------------------------------------------------------
 _VOICE_HTML = """
-<div style="font-family:'Inter',-apple-system,Segoe UI,Roboto,sans-serif;">
-  <button id="micBtn" style="padding:9px 18px;border-radius:999px;border:none;
-    background:#6366F1;color:white;font-size:14px;font-weight:500;cursor:pointer;
-    box-shadow:0 1px 3px rgba(99,102,241,0.4);">
-    🎤 Speak your query
+<div style="font-family:'IBM Plex Mono',monospace;">
+  <button id="micBtn" style="padding:9px 18px;border-radius:4px;
+    border:1px solid #F5A623;background:#141A21;color:#F5A623;
+    font-size:13px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;
+    cursor:pointer;">
+    ● Speak Query
   </button>
-  <div id="voiceStatus" style="margin-top:8px;font-size:13px;color:#6b7280;"></div>
+  <div id="voiceStatus" style="margin-top:8px;font-size:12px;color:#8B98A5;
+    font-family:'Inter',-apple-system,sans-serif;"></div>
 </div>
 <script>
 const btn = document.getElementById('micBtn');
@@ -212,16 +233,18 @@ if (!SR) {
 # ---------------------------------------------------------------------------
 st.markdown(
     """
-    <div style="display:flex;align-items:center;gap:14px;margin-bottom:2px;">
-      <div style="width:48px;height:48px;border-radius:12px;background:#EEF0FF;
-        display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0;">
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:2px;">
+      <div style="width:50px;height:50px;border:1px solid #F5A623;border-radius:4px;
+        background:#141A21;display:flex;align-items:center;justify-content:center;
+        font-size:24px;flex-shrink:0;">
         🔧
       </div>
       <div>
-        <div style="font-size:28px;font-weight:700;color:#1E2233;line-height:1.2;">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:700;
+          color:#F1F5F9;letter-spacing:1px;line-height:1.2;text-transform:uppercase;">
           Technical Manual Search
         </div>
-        <div style="font-size:14px;color:#6b7280;">
+        <div style="font-size:13px;color:#8B98A5;margin-top:3px;">
           Search across every service manual in the shared library, by keyword or by voice.
         </div>
       </div>
@@ -232,13 +255,16 @@ st.markdown(
 storage_ok = store.mode == "drive"
 st.markdown(
     f"""
-    <div style="display:inline-flex;align-items:center;gap:6px;margin:10px 0 18px 0;
-      padding:3px 10px;border-radius:999px;font-size:12px;font-weight:500;
-      background:{'#ECFDF5' if storage_ok else '#FFF7ED'};
-      color:{'#047857' if storage_ok else '#C2410C'};">
-      <span style="width:7px;height:7px;border-radius:50%;
-        background:{'#10B981' if storage_ok else '#F97316'};"></span>
-      Storage: {'Google Drive' if storage_ok else 'local (dev mode, no Drive configured)'}
+    <div style="display:inline-flex;align-items:center;gap:7px;margin:14px 0 20px 0;
+      padding:4px 10px;border-radius:4px;font-family:'IBM Plex Mono',monospace;
+      font-size:11px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;
+      background:{'rgba(34,197,94,0.10)' if storage_ok else 'rgba(245,166,35,0.10)'};
+      border:1px solid {'rgba(34,197,94,0.35)' if storage_ok else 'rgba(245,166,35,0.35)'};
+      color:{'#4ADE80' if storage_ok else '#F5A623'};">
+      <span style="width:6px;height:6px;border-radius:50%;
+        background:{'#22C55E' if storage_ok else '#F5A623'};
+        box-shadow:0 0 6px {'#22C55E' if storage_ok else '#F5A623'};"></span>
+      Storage // {'Google Drive' if storage_ok else 'Local (dev mode)'}
     </div>
     """,
     unsafe_allow_html=True,
@@ -295,20 +321,31 @@ if query.strip():
             with c2:
                 score_pct = round(hit["score"] * 100)
                 if score_pct >= 70:
-                    badge_bg, badge_fg = "#ECFDF5", "#047857"
+                    badge_bg = "rgba(34,197,94,0.12)"
+                    badge_border = "rgba(34,197,94,0.4)"
+                    badge_fg = "#4ADE80"
                 elif score_pct >= 40:
-                    badge_bg, badge_fg = "#FFFBEB", "#B45309"
+                    badge_bg = "rgba(245,166,35,0.12)"
+                    badge_border = "rgba(245,166,35,0.4)"
+                    badge_fg = "#F5A623"
                 else:
-                    badge_bg, badge_fg = "#F3F4F6", "#4B5563"
+                    badge_bg = "rgba(148,163,184,0.12)"
+                    badge_border = "rgba(148,163,184,0.35)"
+                    badge_fg = "#94A3B8"
                 st.markdown(
-                    f"<div style='font-size:15px;'>"
-                    f"<span style='font-weight:600;'>{html.escape(hit['filename'])}</span>"
-                    f" — page {hit['page_number']}"
-                    f"&nbsp;&nbsp;"
-                    f"<span style='background:{badge_bg};color:{badge_fg};"
-                    f"padding:2px 10px;border-radius:999px;font-size:12px;"
-                    f"font-weight:600;'>{score_pct}% match</span>"
-                    f"</div>",
+                    "<div style='font-size:15px;display:flex;align-items:center;"
+                    "gap:10px;flex-wrap:wrap;'>"
+                    "<span style=\"font-family:'IBM Plex Mono',monospace;"
+                    "font-weight:600;color:#F1F5F9;\">"
+                    f"{html.escape(hit['filename'])}</span>"
+                    "<span style=\"font-family:'IBM Plex Mono',monospace;"
+                    f"color:#8B98A5;font-size:13px;\">P.{hit['page_number']}</span>"
+                    "<span style=\"font-family:'IBM Plex Mono',monospace;"
+                    f"background:{badge_bg};border:1px solid {badge_border};"
+                    f"color:{badge_fg};padding:2px 8px;border-radius:4px;"
+                    f"font-size:11px;font-weight:600;letter-spacing:0.3px;\">"
+                    f"MATCH {score_pct}%</span>"
+                    "</div>",
                     unsafe_allow_html=True,
                 )
                 st.markdown(_highlight(hit["snippet"], hit["highlight_terms"]))
@@ -401,8 +438,10 @@ if query.strip():
                                 st.rerun()
                         with nav2:
                             st.markdown(
-                                f"<div style='text-align:center;padding-top:6px;'>"
-                                f"Page {current_page} / {total_pages}</div>",
+                                "<div style=\"text-align:center;padding-top:8px;"
+                                "font-family:'IBM Plex Mono',monospace;font-size:13px;"
+                                "color:#8B98A5;\">"
+                                f"P.{current_page} / {total_pages}</div>",
                                 unsafe_allow_html=True,
                             )
                         with nav3:
