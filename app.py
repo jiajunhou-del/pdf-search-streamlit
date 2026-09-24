@@ -198,17 +198,26 @@ if query.strip():
                 st.markdown(_highlight(hit["snippet"], hit["highlight_terms"]))
                 btn1, btn2 = st.columns([1, 1])
                 with btn1:
-                    if store.mode == "drive":
-                        # Google Drive's own PDF viewer honors a #page=N URL
-                        # fragment, so this opens straight to the matching
-                        # page in a new tab instead of forcing a download.
-                        preview_url = (
-                            f"https://drive.google.com/file/d/{hit['doc_id']}"
-                            f"/view#page={hit['page_number']}"
-                        )
-                        st.link_button("👀 Preview this page", preview_url)
-                    else:
-                        st.caption("Preview needs Drive storage — use download.")
+                    # Google Drive's own web preview has an undocumented
+                    # file-size ceiling and just refuses to render bigger
+                    # manuals ("このファイルはサイズが大きすぎるため、プレ
+                    # ビューできません") -- that's a Drive limitation we
+                    # can't work around by asking it nicely. Instead this
+                    # renders the page using the *browser's own* built-in
+                    # PDF viewer (the same one Chrome/Edge/Firefox use for
+                    # any PDF you open), fed the file's actual bytes
+                    # directly -- no size ceiling, and it also means
+                    # colleagues don't need their own Drive access to the
+                    # folder just to preview a page; only this app's own
+                    # Drive connection is used.
+                    pv_ready_key = f"pvready_{hit['doc_id']}_{hit['page_number']}_{result_index}"
+                    if not st.session_state.get(pv_ready_key):
+                        if st.button(
+                            "👀 Preview this page",
+                            key=f"pvprep_{hit['doc_id']}_{hit['page_number']}_{result_index}",
+                        ):
+                            st.session_state[pv_ready_key] = True
+                            st.rerun()
                 with btn2:
                     # Every displayed result used to eagerly download its
                     # full PDF just to have the bytes ready for this
@@ -246,6 +255,22 @@ if query.strip():
                         ):
                             st.session_state[dl_ready_key] = True
                             st.rerun()
+ 
+                if st.session_state.get(pv_ready_key):
+                    try:
+                        pdf_bytes = _download_bytes(store, hit["doc_id"])
+                    except Exception as e:
+                        st.error(f"Couldn't load preview: {e}")
+                    else:
+                        import base64
+ 
+                        b64 = base64.b64encode(pdf_bytes).decode()
+                        st.components.v1.html(
+                            f'<iframe src="data:application/pdf;base64,{b64}'
+                            f'#page={hit["page_number"]}" width="100%" '
+                            'height="650" style="border:none;"></iframe>',
+                            height=670,
+                        )
 else:
     st.caption("Type a query above, or tap the mic and speak.")
  
