@@ -97,6 +97,18 @@ def _render_page_image(_store, file_id: str, page_number: int) -> bytes:
         doc.close()
  
  
+@st.cache_data(show_spinner=False, max_entries=25, ttl=3600)
+def _page_count(_store, file_id: str) -> int:
+    import pymupdf as fitz
+ 
+    data = _download_bytes(_store, file_id)
+    doc = fitz.open(stream=data, filetype="pdf")
+    try:
+        return doc.page_count
+    finally:
+        doc.close()
+ 
+ 
 def _highlight(snippet: str, terms: list) -> str:
     escaped = html.escape(snippet)
     terms = sorted({t for t in terms if len(t) > 1}, key=len, reverse=True)
@@ -286,13 +298,46 @@ if query.strip():
                             st.rerun()
  
                 if st.session_state.get(pv_ready_key):
+                    # Tracks which page is currently shown in *this*
+                    # preview, separate from hit['page_number'] (the
+                    # page that actually matched the search) -- so
+                    # Previous/Next can move around without losing
+                    # track of where the search result itself pointed.
+                    pv_page_key = f"pvpage_{hit['doc_id']}_{hit['page_number']}_{result_index}"
+                    if pv_page_key not in st.session_state:
+                        st.session_state[pv_page_key] = hit["page_number"]
+                    current_page = st.session_state[pv_page_key]
                     try:
+                        total_pages = _page_count(store, hit["doc_id"])
                         page_img = _render_page_image(
-                            store, hit["doc_id"], hit["page_number"]
+                            store, hit["doc_id"], current_page
                         )
                     except Exception as e:
                         st.error(f"Couldn't load preview: {e}")
                     else:
+                        nav1, nav2, nav3 = st.columns([1, 2, 1])
+                        with nav1:
+                            if st.button(
+                                "◀ Previous page",
+                                key=f"pvprev_{hit['doc_id']}_{hit['page_number']}_{result_index}",
+                                disabled=current_page <= 1,
+                            ):
+                                st.session_state[pv_page_key] = current_page - 1
+                                st.rerun()
+                        with nav2:
+                            st.markdown(
+                                f"<div style='text-align:center;padding-top:6px;'>"
+                                f"Page {current_page} / {total_pages}</div>",
+                                unsafe_allow_html=True,
+                            )
+                        with nav3:
+                            if st.button(
+                                "Next page ▶",
+                                key=f"pvnext_{hit['doc_id']}_{hit['page_number']}_{result_index}",
+                                disabled=current_page >= total_pages,
+                            ):
+                                st.session_state[pv_page_key] = current_page + 1
+                                st.rerun()
                         st.image(page_img, use_container_width=True)
 else:
     st.caption("Type a query above, or tap the mic and speak.")
@@ -371,4 +416,7 @@ with st.expander(f"📚 Document library ({len(docs)} files)"):
                 )
             else:
                 st.rerun()
+ 
+
+
  
