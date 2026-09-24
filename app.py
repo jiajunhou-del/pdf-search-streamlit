@@ -165,7 +165,7 @@ if query.strip():
     hits = index.search(query, top_k=8, doc_id=doc_options[scope_label])
     if not hits:
         st.info("No matching pages found. Try a different phrasing or check the synonym list.")
-    for hit in hits:
+    for result_index, hit in enumerate(hits):
         with st.container(border=True):
             c1, c2 = st.columns([1, 5])
             with c1:
@@ -183,7 +183,9 @@ if query.strip():
                     data=pdf_bytes,
                     file_name=hit["filename"],
                     mime="application/pdf",
-                    key=f"dl_{hit['doc_id']}_{hit['page_number']}",
+                    # result_index guards against any future duplicate
+                    # (doc_id, page_number) pair still producing a clash.
+                    key=f"dl_{hit['doc_id']}_{hit['page_number']}_{result_index}",
                 )
 else:
     st.caption("Type a query above, or tap the mic and speak.")
