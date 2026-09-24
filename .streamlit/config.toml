@@ -1,4 +1,3 @@
-
 # App-wide look and feel. This is the officially supported way to theme a
 # Streamlit app (as opposed to hand-rolled CSS overrides of Streamlit's
 # internal element classes, which tend to break across version upgrades) --
@@ -6,9 +5,9 @@
 # and it will keep working across Streamlit updates.
 [theme]
 base = "light"
-primaryColor = "#6366F1"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F4F5F9"
-textColor = "#1E2233"
+primaryColor = "#2563EB"
+backgroundColor = "#F7F9FC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1B2440"
 font = "sans serif"
  
