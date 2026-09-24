@@ -1,7 +1,18 @@
+# App-wide look and feel. This is the officially supported way to theme a
+# Streamlit app (as opposed to hand-rolled CSS overrides of Streamlit's
+# internal element classes, which tend to break across version upgrades) --
+# so this is the first thing to touch when the app just needs to look
+# different, and it will keep working across Streamlit updates.
+#
+# This palette is deliberately an "instrument panel" look rather than a
+# friendly SaaS one -- dark background, amber accent, sharp-ish corners --
+# since the people using this are technicians reading wiring diagrams and
+# fault codes, not browsing a consumer app.
 [theme]
-base = "light"
-primaryColor = "#6366F1"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F4F5F9"
-textColor = "#1E2233"
+base = "dark"
+primaryColor = "#F5A623"
+backgroundColor = "#0B0F14"
+secondaryBackgroundColor = "#141A21"
+textColor = "#DCE3EA"
 font = "sans serif"
+ 
