@@ -169,7 +169,15 @@ st.components.v1.html(_VOICE_HTML, height=70)
 # Results
 # ---------------------------------------------------------------------------
 if query.strip():
-    hits = index.search(query, top_k=8, doc_id=doc_options[scope_label])
+    try:
+        hits = index.search(query, top_k=8, doc_id=doc_options[scope_label])
+    except Exception as e:
+        st.error(
+            f"Search failed: {e}. If this keeps happening, use the app's "
+            "'Reboot app' option (or ask whoever manages it to) to clear "
+            "the search index and rebuild it fresh."
+        )
+        hits = []
     if not hits:
         st.info("No matching pages found. Try a different phrasing or check the synonym list.")
     for result_index, hit in enumerate(hits):
