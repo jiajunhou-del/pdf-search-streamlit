@@ -1,0 +1,21 @@
+[
+  ["pcb", "panel control board", "printed circuit board"],
+  ["hmi", "human machine interface", "operator panel", "control panel"],
+  ["vfd", "variable frequency drive", "inverter"],
+  ["plc", "programmable logic controller"],
+  ["psu", "power supply unit", "power supply"],
+  ["io board", "i/o board", "input output board"],
+  ["cb", "circuit breaker"],
+  ["oc", "overcurrent", "over current"],
+  ["ov", "overvoltage", "over voltage"],
+  ["temp", "temperature"],
+  ["qty", "quantity"],
+  ["mfg", "manufacturer"],
+  ["pn", "part number"],
+  ["sn", "serial number"],
+  ["fw", "firmware"],
+  ["sw", "software"],
+  ["hw", "hardware"],
+  ["encoder", "position sensor"],
+  ["e-stop", "emergency stop"]
+]
