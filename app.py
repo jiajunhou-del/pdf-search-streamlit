@@ -528,7 +528,7 @@ if view == "search":
     # Popular search categories
     # -----------------------------------------------------------------
     st.markdown("<div style='font-size:16px;font-weight:700;color:#1B2440;margin:20px 0 10px 0;'>🔥 Popular search categories</div>", unsafe_allow_html=True)
-    category_counts = Counter(d["category"] for d in docs)
+    category_counts = Counter(d.get("category", "Uncategorized") for d in docs)
     cat_rows = [CATEGORY_NAMES[i:i + 3] for i in range(0, len(CATEGORY_NAMES), 3)]
     for row in cat_rows:
         cols = st.columns(3)
@@ -620,7 +620,7 @@ if view == "search":
                 f"📁 Documents tagged '{html.escape(browse_category)}'</div>",
                 unsafe_allow_html=True,
             )
-            matching_docs = [d for d in docs if d["category"] == browse_category]
+            matching_docs = [d for d in docs if d.get("category", "Uncategorized") == browse_category]
             if not matching_docs:
                 st.caption("No documents tagged with this category yet.")
             else:
@@ -726,7 +726,8 @@ if view == "search":
             row1, row2, row3 = st.columns([3, 2, 1])
             row1.write(d["filename"])
             with row2:
-                current_cat = d["category"] if d["category"] in CATEGORY_NAMES else CATEGORY_NAMES[0]
+                doc_category = d.get("category", "Uncategorized")
+                current_cat = doc_category if doc_category in CATEGORY_NAMES else CATEGORY_NAMES[0]
                 new_cat = st.selectbox(
                     "Category",
                     CATEGORY_NAMES,
@@ -734,7 +735,7 @@ if view == "search":
                     key=f"cat_{d['doc_id']}",
                     label_visibility="collapsed",
                 )
-                if new_cat != d["category"]:
+                if new_cat != doc_category:
                     try:
                         index.set_category(d["doc_id"], new_cat)
                     except Exception as e:
