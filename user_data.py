@@ -5,13 +5,16 @@ Google Drive folder as the PDFs and the search index -- reusing the
 store's generic named-file read/write (drive_store.py) rather than a
 separate database.
  
-Identity comes from st.user.email, which Streamlit populates once the
-app's Community Cloud "Sharing" setting restricts viewers by email --
-that's what makes each signed-in colleague's history/favorites their own,
-even though everyone's uploads still land in the same shared Drive
-identity for storage. Locally, or before that restriction is turned on,
-there's no signed-in viewer to key data by, so both features degrade
-gracefully to "sign in to use this."
+Identity is just whatever name each person types into the sidebar
+(app.py's "Your name" field) -- not a real login. The obvious alternative,
+Streamlit's st.user, doesn't work for this: as of Streamlit 1.42, Community
+Cloud's viewer-email allowlist (which restricts who can open this app at
+all) no longer exposes the viewer's verified email to the app itself --
+that now requires wiring up a full Google OAuth/OIDC login flow
+separately, which is more setup than this needs. A typed name is a much
+lower bar, at the cost of not being verified (nothing stops someone from
+typing a colleague's name) -- an acceptable trade for a small, trusted
+internal team.
 """
 import json
 import re
@@ -25,27 +28,6 @@ MAX_HISTORY = 50
 def _safe_filename(email: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", email.lower()).strip("_")
     return f"userdata__{slug}.json"
- 
- 
-def current_user_email(store_mode: str = None):
-    """The signed-in viewer's email, or None if there isn't one.
- 
-    st.user is only populated when Community Cloud's "Sharing" setting
-    restricts viewers by email (which requires signing in) -- without
-    that, there's no real identity to key History/Favorites by. In local
-    dev mode only, fall back to a stable placeholder so the feature can
-    still be exercised while developing.
-    """
-    try:
-        if getattr(st.user, "is_logged_in", False):
-            email = getattr(st.user, "email", None)
-            if email:
-                return email
-    except Exception:
-        pass
-    if store_mode == "local":
-        return "local-dev@example.com"
-    return None
  
  
 def _now_iso() -> str:
