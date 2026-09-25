@@ -1,4 +1,4 @@
-""
+"""
 Streamlit version of the PDF technical-manual search tool.
  
 Why this exists alongside the original FastAPI+HTML version: deploying
