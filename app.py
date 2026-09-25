@@ -396,6 +396,15 @@ if (!SR) {
 if "nav" not in st.session_state:
     st.session_state.nav = "search"
  
+# The "Your name" identity (see below) also lives in the page's own URL as
+# ?viewer_name=..., so simply reloading this tab or reopening a bookmarked
+# link that already has it restores it with zero clicks -- st.query_params
+# is ordinary Streamlit state read/written directly by the main script, so
+# unlike a trick routed through an embedded component's iframe, there's no
+# browser sandbox permission involved here at all.
+if "viewer_name" not in st.session_state:
+    st.session_state.viewer_name = st.query_params.get("viewer_name", "")
+ 
 with st.sidebar:
     st.markdown(
         """
@@ -429,10 +438,10 @@ with st.sidebar:
     # app itself as of Streamlit 1.42 -- st.user now requires a full
     # Google OAuth/OIDC login flow wired up separately, which is more
     # setup than this needs right now. Instead, each person just tells the
-    # app their own name once per browser session, and that's what their
-    # History/Favorites are saved under. It's not verified (nothing stops
-    # someone from typing a colleague's name), but for a small trusted
-    # internal team that's a reasonable trade for zero extra setup.
+    # app their own name once, and that's what their History/Favorites are
+    # saved under. It's not verified (nothing stops someone from typing a
+    # colleague's name), but for a small trusted internal team that's a
+    # reasonable trade for zero extra setup.
     st.markdown("<div style='margin-top:14px;font-size:11px;font-weight:600;color:#9CA3AF;text-transform:uppercase;'>Your name</div>", unsafe_allow_html=True)
     name_input = st.text_input(
         "Your name",
@@ -440,9 +449,14 @@ with st.sidebar:
         placeholder="e.g. Jiajun Hou",
         label_visibility="collapsed",
         key="viewer_name_input",
-        help="Used to keep your own search history and favorites separate from your colleagues'. Resets if you close this browser tab.",
+        help="Used to keep your own search history and favorites separate from your colleagues'. Once set, it's part of this page's link -- bookmark it (or just keep reusing this tab) to skip retyping it next time.",
     )
     st.session_state.viewer_name = name_input.strip()
+    if st.session_state.viewer_name:
+        st.query_params["viewer_name"] = st.session_state.viewer_name
+        st.caption(f"🔖 Bookmark this page to return as **{html.escape(st.session_state.viewer_name)}**.")
+    elif "viewer_name" in st.query_params:
+        del st.query_params["viewer_name"]
  
 viewer_email = st.session_state.get("viewer_name") or None
  
