@@ -137,6 +137,53 @@ st.markdown(
         padding: 0;
         border: none;
     }
+ 
+    /* Sidebar: switched from plain white to a dark "instrument panel" look
+       -- a white sidebar on a near-white main background (per feedback)
+       didn't read as a separate area at all. Dark navy + a blue accent
+       (the same blue as primaryColor in config.toml) gives a clear visual
+       boundary and a more "technical tool" feel. Re-declared *after* the
+       light-theme sidebar button rules above so these win on the cascade
+       without needing !important everywhere. */
+    [data-testid="stSidebar"] {
+        background-color: #0B1220;
+        border-right: 1px solid #1E293B;
+    }
+    [data-testid="stSidebar"] * {
+        color: #CBD5E1;
+    }
+    [data-testid="stSidebar"] svg {
+        fill: #64748B;
+    }
+    [data-testid="stSidebar"] .stButton > button[kind="secondary"] {
+        background: transparent;
+        color: #CBD5E1;
+    }
+    [data-testid="stSidebar"] .stButton > button[kind="secondary"]:hover {
+        background: #16213A;
+        color: #F8FAFC;
+    }
+    [data-testid="stSidebar"] .stButton > button[kind="primary"] {
+        background: #16294D;
+        color: #7FB3FF;
+        font-weight: 600;
+        box-shadow: inset 3px 0 0 #3B82F6;
+    }
+    [data-testid="stSidebar"] .stTextInput input {
+        background-color: #131F35;
+        color: #F1F5F9;
+        border: 1px solid #263449;
+    }
+    [data-testid="stSidebar"] .stTextInput input::placeholder {
+        color: #5B6B84;
+    }
+    [data-testid="stSidebar"] .stTextInput input:focus {
+        border-color: #3B82F6;
+        box-shadow: 0 0 0 1px #3B82F6;
+    }
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+        color: #8FA8C9 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -450,11 +497,12 @@ with st.sidebar:
     st.markdown(
         """
         <div style="display:flex;align-items:center;gap:10px;margin:4px 0 18px 0;">
-          <div style="width:36px;height:36px;border-radius:10px;background:#EFF6FF;
+          <div style="width:36px;height:36px;border-radius:10px;background:rgba(59,130,246,0.15);
+            border:1px solid rgba(59,130,246,0.35);
             display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">
             🔧
           </div>
-          <div style="font-size:16px;font-weight:700;color:#1B2440;line-height:1.2;">
+          <div style="font-size:16px;font-weight:700;color:#F1F5F9;line-height:1.2;">
             Technical Manual<br/>Search
           </div>
         </div>
@@ -483,7 +531,7 @@ with st.sidebar:
     # saved under. It's not verified (nothing stops someone from typing a
     # colleague's name), but for a small trusted internal team that's a
     # reasonable trade for zero extra setup.
-    st.markdown("<div style='margin-top:14px;font-size:11px;font-weight:600;color:#9CA3AF;text-transform:uppercase;'>Your name</div>", unsafe_allow_html=True)
+    st.markdown("<div style='margin-top:14px;font-size:11px;font-weight:600;color:#64A0E8;letter-spacing:0.05em;text-transform:uppercase;'>Your name</div>", unsafe_allow_html=True)
     name_input = st.text_input(
         "Your name",
         value=st.session_state.get("viewer_name", ""),
