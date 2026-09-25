@@ -1124,3 +1124,38 @@ elif view == "about":
             """
         )
  
+    with st.container(border=True):
+        st.markdown(
+            """
+            **System architecture & software**
+ 
+            - **Web app**: built with Streamlit, an open-source Python web app framework.
+            - **Hosting**: runs on Streamlit Community Cloud (free hosting); the source
+              code lives in a GitHub repo, and pushing changes redeploys the app
+              automatically.
+            - **File storage**: PDFs and the search index live in the company's shared
+              Google Drive folder — the app only reads from it and doesn't keep a
+              separate copy of anything.
+            - **Search engine**: uses TF-IDF, a standard text-matching algorithm that
+              runs entirely inside the app. No external AI service is used, and manual
+              content is never sent to a third party.
+ 
+            **Security**
+ 
+            - **Access control**: Streamlit Community Cloud is configured to let only
+              specific email addresses open this app.
+            - **File permissions**: documents live in the company's Google Drive, so
+              access follows Drive's own sharing settings — no separate storage system
+              was built for this.
+            - **Credentials**: the Google Drive connection credentials are stored
+              encrypted on Streamlit's side and never appear in the source code.
+            - **Encryption**: all traffic is served over HTTPS.
+ 
+            **Where files are stored**
+ 
+            All PDFs, the search index, and everyone's search history/favorites live in
+            the company's shared Google Drive folder — the single source of truth. The
+            app itself doesn't persist any files, so nothing is lost even if it restarts.
+            """
+        )
+ 
