@@ -320,6 +320,17 @@ def _goto_search(prefill_query: str = None, prefill_category: str = None):
 # certificate hassle required.
 # ---------------------------------------------------------------------------
 _VOICE_HTML = """
+<style>
+@keyframes micPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(220,38,38,0.45); }
+  70%  { box-shadow: 0 0 0 10px rgba(220,38,38,0); }
+  100% { box-shadow: 0 0 0 0 rgba(220,38,38,0); }
+}
+#micBtn.listening {
+  background: #DC2626 !important;
+  animation: micPulse 1.4s infinite;
+}
+</style>
 <div style="font-family:'Inter',-apple-system,Segoe UI,Roboto,sans-serif;">
   <button id="micBtn" style="padding:9px 18px;border-radius:999px;border:none;
     background:#2563EB;color:white;font-size:14px;font-weight:500;cursor:pointer;
@@ -340,7 +351,15 @@ if (!SR) {
   recog.lang = 'en-US';
   recog.interimResults = true;
   recog.maxAlternatives = 1;
-  recog.onstart = () => { statusEl.innerText = '🎙️ Listening… speak now'; };
+  // Recognized text is written into the input box via the voice_query URL
+  // param below (read back by app.py as the search box's starting value)
+  // -- there's no way to poke text directly into a Streamlit widget from
+  // inside this embedded component, so a full page reload carrying the
+  // text in the URL is what makes it actually land in the search box.
+  recog.onstart = () => {
+    statusEl.innerText = '🎙️ Listening… speak now';
+    btn.classList.add('listening');
+  };
   recog.onerror = (e) => {
     const messages = {
       'no-speech': 'No speech detected -- try again.',
@@ -350,7 +369,9 @@ if (!SR) {
       'network': 'Network error during speech recognition.'
     };
     statusEl.innerText = messages[e.error] || ('Voice error: ' + e.error);
+    btn.classList.remove('listening');
   };
+  recog.onend = () => { btn.classList.remove('listening'); };
   recog.onresult = (e) => {
     let text = '';
     for (let i = 0; i < e.results.length; i++) { text += e.results[i][0].transcript; }
