@@ -101,33 +101,46 @@ st.markdown(
         font-weight: 600;
     }
  
-    /* Category cards ("Popular search categories"): the colored look comes
-       from the markdown block rendered above the button, in each card's own
-       st.container(key=f"catcard_{name}") -- that key gives Streamlit's
-       wrapper div a stable "st-key-catcard_<name>" class to target here.
-       The real st.button (key=f"catbtn_{name}", a deliberately different
-       prefix so its own "st-key-catbtn_<name>" class can be targeted
-       without also matching the outer card by substring) is stretched over
-       the whole card and made invisible, so clicking anywhere on the
-       colored card -- not just a visible "Browse" label -- triggers it. */
-    div[class*="st-key-catcard_"] {
+    /* Clickable cards: category cards ("Popular search categories") and
+       the Recent Searches / My History rows all use the same trick, so
+       they share this one CSS block (three parallel key prefixes --
+       catcard_/catbtn_, recentcard_/recentbtn_, myhistcard_/myhistbtn_ --
+       each pair deliberately non-overlapping as substrings of each
+       other, so the "*btn_" selectors below don't also match their own
+       "*card_" wrapper). The colored/white look comes from a markdown
+       block rendered above a button, inside a st.container(key=...) --
+       that key gives Streamlit's wrapper div a stable "st-key-<key>"
+       class to target here. The real st.button is stretched over the
+       whole card and made invisible, so clicking anywhere on the card --
+       not just a visible label -- triggers it. */
+    div[class*="st-key-catcard_"],
+    div[class*="st-key-recentcard_"],
+    div[class*="st-key-myhistcard_"] {
         position: relative;
         border: none !important;
         padding: 0 !important;
         margin-bottom: 14px;
         transition: transform 0.05s ease-in-out;
     }
-    div[class*="st-key-catcard_"]:has(button:active) {
+    div[class*="st-key-catcard_"]:has(button:active),
+    div[class*="st-key-recentcard_"]:has(button:active),
+    div[class*="st-key-myhistcard_"]:has(button:active) {
         transform: scale(0.99);
     }
-    div[class*="st-key-catbtn_"] {
+    div[class*="st-key-catbtn_"],
+    div[class*="st-key-recentbtn_"],
+    div[class*="st-key-myhistbtn_"] {
         position: absolute;
         inset: 0;
     }
-    div[class*="st-key-catbtn_"] .stButton {
+    div[class*="st-key-catbtn_"] .stButton,
+    div[class*="st-key-recentbtn_"] .stButton,
+    div[class*="st-key-myhistbtn_"] .stButton {
         height: 100%;
     }
-    div[class*="st-key-catbtn_"] .stButton > button {
+    div[class*="st-key-catbtn_"] .stButton > button,
+    div[class*="st-key-recentbtn_"] .stButton > button,
+    div[class*="st-key-myhistbtn_"] .stButton > button {
         width: 100%;
         height: 100%;
         min-height: 0;
@@ -297,6 +310,65 @@ def _category_badge_html(category: str) -> str:
         f"<span style='background:{meta['bg']};color:{meta['fg']};padding:2px 10px;"
         f"border-radius:999px;font-size:12px;font-weight:600;'>{meta['icon']} {html.escape(category)}</span>"
     )
+ 
+ 
+def _scope_badge_html(scope_filename: str) -> str:
+    """A plain blue pill for the document a search was narrowed to (the
+    "Search within" dropdown), shown next to the category badge on a
+    Recent Searches / History row -- mirrors _category_badge_html's look
+    but in a neutral blue since it isn't tied to a category color."""
+    name = scope_filename.rsplit(".", 1)[0]  # drop the .pdf extension
+    if len(name) > 22:
+        name = name[:21] + "…"
+    return (
+        f"<span style='background:#EFF6FF;color:#2563EB;padding:2px 10px;"
+        f"border-radius:999px;font-size:12px;font-weight:600;'>{html.escape(name)}</span>"
+    )
+ 
+ 
+def _render_history_row(entry: dict, key_prefix: str, index: int):
+    """One clickable card for a past search -- used by both the Search
+    page's "Recent Searches" panel and the full "My History" list, so the
+    two stay visually consistent. The whole card is clickable (same
+    invisible-button-over-a-styled-container trick as the category cards
+    above) rather than a separate small "Search again" button, to match
+    the reference look of a plain tappable list row."""
+    badges = ""
+    category = entry.get("category")
+    if category:
+        badges += _category_badge_html(category)
+    scope_filename = entry.get("scope_filename")
+    if scope_filename:
+        badges += _scope_badge_html(scope_filename)
+    result_count = entry.get("result_count", 0)
+    doc_label = f"{result_count} document{'s' if result_count != 1 else ''}"
+    card_key = f"{key_prefix}card_{index}"
+    btn_key = f"{key_prefix}btn_{index}"
+    with st.container(key=card_key):
+        st.markdown(
+            f"""
+            <div style="background:#FFFFFF;border:1px solid #E9EDF3;border-radius:12px;
+              padding:14px 16px;box-shadow:0 1px 2px rgba(16,24,40,0.04);">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+                <div style="display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap;">
+                  <span style="font-size:15px;color:#2563EB;flex-shrink:0;">🔍</span>
+                  <span style="font-size:14px;font-weight:600;color:#1B2440;">{html.escape(entry['query'])}</span>
+                  {badges}
+                </div>
+                <div style="display:flex;align-items:center;gap:12px;flex-shrink:0;">
+                  <div style="text-align:right;line-height:1.4;">
+                    <div style="font-size:12px;color:#374151;">{doc_label}</div>
+                    <div style="font-size:11px;color:#9CA3AF;">{user_data.humanize_ago(entry['ts'])}</div>
+                  </div>
+                  <span style="font-size:15px;color:#9CA3AF;">→</span>
+                </div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("Search again", key=btn_key, use_container_width=True):
+            _goto_search(prefill_query=entry["query"])
  
  
 def _favorite_toggle(doc_id: str, filename: str, page_number: int, widget_id: str):
@@ -804,7 +876,18 @@ if view == "search":
  
         if viewer_email and query.strip() != st.session_state.get("last_logged_query"):
             st.session_state.last_logged_query = query.strip()
-            user_data.add_history_entry(store, viewer_email, query.strip(), len(hits))
+            # Distinct documents, not raw page hits -- "4 documents" reads
+            # more usefully in Recent Searches than "7 result(s)" when
+            # several of those hits are different pages of the same manual.
+            doc_count = len({h["doc_id"] for h in hits})
+            user_data.add_history_entry(
+                store,
+                viewer_email,
+                query.strip(),
+                doc_count,
+                category=category_label if category_label != "All categories" else None,
+                scope_filename=scope_label if scope_label != "All documents" else None,
+            )
  
         if not hits:
             st.info("No matching pages found. Try a different phrasing or check the synonym list.")
@@ -859,25 +942,25 @@ if view == "search":
         else:
             col_recent, col_tips = st.columns([2, 1])
             with col_recent:
-                st.markdown("<div style='font-size:15px;font-weight:700;color:#1B2440;margin-bottom:6px;'>Recent Searches</div>", unsafe_allow_html=True)
+                recent = user_data.get_history(store, viewer_email, limit=6) if viewer_email else []
+                header_l, header_r = st.columns([3, 1.6])
+                with header_l:
+                    st.markdown(
+                        "<div style='font-size:15px;font-weight:700;color:#1B2440;margin-bottom:6px;'>🕐 Recent Searches</div>",
+                        unsafe_allow_html=True,
+                    )
+                with header_r:
+                    if recent:
+                        if st.button("View all history →", key="view_all_history", use_container_width=True):
+                            st.session_state.nav = "history"
+                            st.rerun()
                 if not viewer_email:
                     st.caption("Enter your name in the sidebar to keep a history of your searches.")
+                elif not recent:
+                    st.caption("No searches yet -- try typing something above.")
                 else:
-                    recent = user_data.get_history(store, viewer_email, limit=6)
-                    if not recent:
-                        st.caption("No searches yet -- try typing something above.")
-                    for entry in recent:
-                        with st.container(border=True):
-                            rc1, rc2 = st.columns([4, 1])
-                            with rc1:
-                                st.markdown(
-                                    f"<div style='font-size:14px;font-weight:600;color:#1B2440;'>{html.escape(entry['query'])}</div>"
-                                    f"<div style='font-size:12px;color:#6b7280;'>{entry['result_count']} result(s) · {user_data.humanize_ago(entry['ts'])}</div>",
-                                    unsafe_allow_html=True,
-                                )
-                            with rc2:
-                                if st.button("Search again", key=f"rerun_{entry['ts']}"):
-                                    _goto_search(prefill_query=entry["query"])
+                    for i, entry in enumerate(recent):
+                        _render_history_row(entry, "recent", i)
             with col_tips:
                 st.markdown(
                     """
@@ -991,18 +1074,9 @@ elif view == "history":
         history = user_data.get_history(store, viewer_email)
         if not history:
             st.caption("No searches yet -- head to Search and look something up.")
-        for entry in history:
-            with st.container(border=True):
-                hc1, hc2 = st.columns([4, 1])
-                with hc1:
-                    st.markdown(
-                        f"<div style='font-size:15px;font-weight:600;color:#1B2440;'>{html.escape(entry['query'])}</div>"
-                        f"<div style='font-size:12px;color:#6b7280;'>{entry['result_count']} result(s) · {user_data.humanize_ago(entry['ts'])}</div>",
-                        unsafe_allow_html=True,
-                    )
-                with hc2:
-                    if st.button("Search again", key=f"hist_{entry['ts']}"):
-                        _goto_search(prefill_query=entry["query"])
+        else:
+            for i, entry in enumerate(history):
+                _render_history_row(entry, "myhist", i)
  
 elif view == "favorites":
     st.markdown("<div style='font-size:22px;font-weight:700;color:#1B2440;margin-bottom:12px;'>☆ Favorites</div>", unsafe_allow_html=True)
