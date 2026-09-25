@@ -78,11 +78,22 @@ def _save(store, email: str, data: dict):
     _load.clear()
  
  
-def add_history_entry(store, email, query: str, result_count: int):
+def add_history_entry(store, email, query: str, result_count: int, category: str = None, scope_filename: str = None):
     if not email:
         return
     data = dict(_load(store, email))
-    entry = {"query": query, "result_count": result_count, "ts": _now_iso()}
+    # category/scope_filename record what the search was narrowed to (the
+    # Category / "Search within" dropdowns at the time), purely so the
+    # Recent Searches cards can show the same little context badges the
+    # search results themselves show -- older entries saved before this
+    # was added simply won't have them (get_history callers use .get()).
+    entry = {
+        "query": query,
+        "result_count": result_count,
+        "ts": _now_iso(),
+        "category": category,
+        "scope_filename": scope_filename,
+    }
     # De-dupe: re-searching something already in history just moves it to
     # the top with a fresh timestamp, instead of listing it twice.
     history = [entry] + [h for h in data.get("history", []) if h.get("query") != query]
