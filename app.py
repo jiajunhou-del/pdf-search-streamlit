@@ -403,12 +403,44 @@ def _goto_search(prefill_query: str = None, prefill_category: str = None):
  
 # ---------------------------------------------------------------------------
 # Voice input: Streamlit has no built-in microphone widget, so this embeds
-# the same browser Web Speech API used in the original prototype. Recognized
-# text is written into the page's URL query string, which triggers a normal
-# Streamlit rerun that Python then reads back via st.query_params. This
-# needs a real HTTPS origin to access the microphone at all -- which is
-# exactly what Streamlit Community Cloud provides automatically, no
-# certificate hassle required.
+# the same browser Web Speech API used in the original prototype. This needs
+# a real HTTPS origin to access the microphone at all -- which is exactly
+# what Streamlit Community Cloud provides automatically, no certificate
+# hassle required.
+#
+# Getting the recognized text from inside this iframe into the actual
+# search box took three tries:
+#   1. Navigate the top page directly (`window.parent.location.href = ...`).
+#      Confirmed in testing that Chrome blocks this outright -- the iframe
+#      components.v1.html() creates has no "allow-top-navigation" sandbox
+#      permission, so the mic's status line would show the recognized text,
+#      but the page never actually reloaded and the search box stayed empty.
+#   2. Post the text to a small listener injected into the top page (so
+#      *it* does the navigation instead, unsandboxed). Also dead on
+#      arrival: Streamlit's HTML renderer runs inline event-handler
+#      attributes like onerror="..." through React's prop validation,
+#      which rejects a string handler and throws before it ever runs.
+#   3. Report the text back as a real Streamlit *component value*, over
+#      the same protocol every custom component uses. This is the
+#      textbook-correct approach, but empirically broken in this
+#      Streamlit build -- even the well-established third-party
+#      streamlit-js-eval package hits the exact same "Received component
+#      message for unregistered ComponentInstance!" warning here, which
+#      means Streamlit's own frontend isn't registering *any* custom
+#      component's iframe right now, not just a homemade one.
+#
+# What actually works: this iframe's sandbox includes "allow-same-origin"
+# alongside "allow-scripts" -- and combining those two specific flags is
+# explicitly known to let a sandboxed srcdoc iframe access its parent
+# document directly (Chrome even logs a warning about it: "can escape its
+# sandboxing"). Top-*navigation* is still blocked regardless (that's a
+# separate flag), but plain same-origin DOM access is not, so instead of
+# navigating or messaging anything, the recognized text is written
+# straight into the real search <input> in the parent page (via the
+# native value setter + a synthetic "input" event, the standard trick for
+# updating a React-controlled input from outside React), then the input
+# is blurred -- which is what Streamlit's own text_input already commits
+# a new value on, exactly as if a person had typed it and clicked away.
 # ---------------------------------------------------------------------------
 _VOICE_HTML = """
 <style>
@@ -433,6 +465,35 @@ _VOICE_HTML = """
 <script>
 const btn = document.getElementById('micBtn');
 const statusEl = document.getElementById('voiceStatus');
+ 
+// Finds the real search <input> in the parent page (see the big comment
+// above) and fills it in the same way a person typing would, then blurs
+// it so Streamlit commits the new value. Falls back to just leaving the
+// text in this iframe's own status line (for manual copy/paste) if the
+// parent DOM ever doesn't match what's expected here.
+function fillParentSearchBox(text) {
+  try {
+    const doc = window.parent.document;
+    const input = doc.querySelector('input[aria-label="Search"]')
+      || doc.querySelector('input[placeholder*="overcurrent fault"]');
+    if (!input) {
+      statusEl.innerText = 'Could not find the search box automatically -- copy this: "' + text + '"';
+      return false;
+    }
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.parent.HTMLInputElement.prototype, 'value'
+    ).set;
+    nativeSetter.call(input, text);
+    input.dispatchEvent(new window.parent.Event('input', { bubbles: true }));
+    input.focus();
+    input.blur();
+    return true;
+  } catch (err) {
+    statusEl.innerText = 'Could not fill the search box automatically -- copy this: "' + text + '"';
+    return false;
+  }
+}
+ 
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 if (!SR) {
   statusEl.innerText = 'Voice input needs Chrome/Edge (Web Speech API not available here).';
@@ -442,11 +503,6 @@ if (!SR) {
   recog.lang = 'en-US';
   recog.interimResults = true;
   recog.maxAlternatives = 1;
-  // Recognized text is written into the input box via the voice_query URL
-  // param below (read back by app.py as the search box's starting value)
-  // -- there's no way to poke text directly into a Streamlit widget from
-  // inside this embedded component, so a full page reload carrying the
-  // text in the URL is what makes it actually land in the search box.
   recog.onstart = () => {
     statusEl.innerText = '🎙️ Listening… speak now';
     btn.classList.add('listening');
@@ -466,11 +522,12 @@ if (!SR) {
   recog.onresult = (e) => {
     let text = '';
     for (let i = 0; i < e.results.length; i++) { text += e.results[i][0].transcript; }
-    statusEl.innerText = text;
     if (e.results[e.results.length - 1].isFinal && text.trim()) {
-      const url = new URL(window.parent.location.href);
-      url.searchParams.set('voice_query', text.trim());
-      window.parent.location.href = url.toString();
+      if (fillParentSearchBox(text.trim())) {
+        statusEl.innerText = '✅ Searching for: "' + text.trim() + '"';
+      }
+    } else {
+      statusEl.innerText = text;
     }
   };
   btn.onclick = () => { statusEl.innerText = 'Starting…'; recog.start(); };
@@ -627,24 +684,6 @@ if view == "search":
     if "category_widget_key" not in st.session_state:
         st.session_state.category_widget_key = 0
  
-    # The recognized speech arrives as a ?voice_query=... URL param (see
-    # _VOICE_HTML below), but just passing it as this text_input's `value=`
-    # does nothing once the widget already exists in session_state from an
-    # earlier render -- Streamlit then ignores `value=` entirely and keeps
-    # whatever the widget already had (this was the bug: the mic status line
-    # showed the recognized text, but the search box above stayed empty and
-    # no search ran). Routing it through the same prefill_query +
-    # search_widget_key bump used by category cards/history/favorites forces
-    # a brand-new widget instance, so the transcribed text actually lands in
-    # the box -- and since search runs below whenever the box is non-empty
-    # (no separate "confirm" step), that alone is enough to search
-    # automatically, with no extra click needed.
-    voice_query = st.query_params.get("voice_query", "")
-    if voice_query:
-        del st.query_params["voice_query"]
-        st.session_state["prefill_query"] = voice_query
-        st.session_state.search_widget_key += 1
- 
     if "prefill_query" in st.session_state:
         initial_query = st.session_state.pop("prefill_query")
     else:
@@ -697,6 +736,11 @@ if view == "search":
     with col_btn:
         st.button("🔍 Search", use_container_width=True)
  
+    # See the big comment above _VOICE_HTML for why this fills the search
+    # box directly via same-origin DOM access instead of going through
+    # Streamlit's own (currently broken, in this build) component-value
+    # protocol -- the recognized text lands straight in the real <input>
+    # above, so nothing further needs to happen here at all.
     st.components.v1.html(_VOICE_HTML, height=70)
  
     # -----------------------------------------------------------------
