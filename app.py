@@ -622,19 +622,33 @@ if view == "search":
         unsafe_allow_html=True,
     )
  
-    voice_query = st.query_params.get("voice_query", "")
-    if voice_query:
-        del st.query_params["voice_query"]
- 
     if "search_widget_key" not in st.session_state:
         st.session_state.search_widget_key = 0
     if "category_widget_key" not in st.session_state:
         st.session_state.category_widget_key = 0
  
+    # The recognized speech arrives as a ?voice_query=... URL param (see
+    # _VOICE_HTML below), but just passing it as this text_input's `value=`
+    # does nothing once the widget already exists in session_state from an
+    # earlier render -- Streamlit then ignores `value=` entirely and keeps
+    # whatever the widget already had (this was the bug: the mic status line
+    # showed the recognized text, but the search box above stayed empty and
+    # no search ran). Routing it through the same prefill_query +
+    # search_widget_key bump used by category cards/history/favorites forces
+    # a brand-new widget instance, so the transcribed text actually lands in
+    # the box -- and since search runs below whenever the box is non-empty
+    # (no separate "confirm" step), that alone is enough to search
+    # automatically, with no extra click needed.
+    voice_query = st.query_params.get("voice_query", "")
+    if voice_query:
+        del st.query_params["voice_query"]
+        st.session_state["prefill_query"] = voice_query
+        st.session_state.search_widget_key += 1
+ 
     if "prefill_query" in st.session_state:
         initial_query = st.session_state.pop("prefill_query")
     else:
-        initial_query = voice_query
+        initial_query = ""
  
     category_options = ["All categories"] + CATEGORY_NAMES
     if "prefill_category" in st.session_state:
@@ -1006,4 +1020,3 @@ elif view == "about":
             """
         )
  
-
