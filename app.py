@@ -1,4 +1,4 @@
-"""
+""
 Streamlit version of the PDF technical-manual search tool.
  
 Why this exists alongside the original FastAPI+HTML version: deploying
@@ -115,7 +115,11 @@ def get_index():
  
 index = get_index()
 store = index.store
-viewer_email = user_data.current_user_email(store.mode)
+# viewer_email is resolved once the sidebar (which asks "who are you?") has
+# rendered -- see below. Declared here only so functions defined above that
+# reference it as a module-level name (Python looks up globals at call
+# time, not at def time) don't error before that point.
+viewer_email = None
  
  
 # Community Cloud's free tier caps this whole process at ~1GB RAM, and
@@ -208,13 +212,12 @@ def _category_badge_html(category: str) -> str:
  
  
 def _favorite_toggle(doc_id: str, filename: str, page_number: int, widget_id: str):
-    """Renders a star button that adds/removes this page from the
-    signed-in viewer's Favorites. Without a signed-in viewer (no Community
-    Cloud email restriction active) there's no identity to save against,
-    so this shows a disabled hint instead of a button that would silently
-    do nothing."""
+    """Renders a star button that adds/removes this page from the current
+    viewer's Favorites. Without a name entered in the sidebar there's no
+    identity to save against, so this shows a hint instead of a button
+    that would silently do nothing."""
     if not viewer_email:
-        st.caption("☆ Sign in to save favorites")
+        st.caption("☆ Enter your name (sidebar) to save favorites")
         return
     is_fav = user_data.is_favorite(store, viewer_email, doc_id, page_number)
     label = "★ Favorited" if is_fav else "☆ Add to favorites"
@@ -420,6 +423,29 @@ with st.sidebar:
             st.session_state.nav = key
             st.rerun()
  
+    # Simple, no-setup identity for My History / Favorites: Streamlit
+    # Community Cloud's viewer-email allowlist (which restricts who can
+    # open this app) stopped exposing the visitor's verified email to the
+    # app itself as of Streamlit 1.42 -- st.user now requires a full
+    # Google OAuth/OIDC login flow wired up separately, which is more
+    # setup than this needs right now. Instead, each person just tells the
+    # app their own name once per browser session, and that's what their
+    # History/Favorites are saved under. It's not verified (nothing stops
+    # someone from typing a colleague's name), but for a small trusted
+    # internal team that's a reasonable trade for zero extra setup.
+    st.markdown("<div style='margin-top:14px;font-size:11px;font-weight:600;color:#9CA3AF;text-transform:uppercase;'>Your name</div>", unsafe_allow_html=True)
+    name_input = st.text_input(
+        "Your name",
+        value=st.session_state.get("viewer_name", ""),
+        placeholder="e.g. Jiajun Hou",
+        label_visibility="collapsed",
+        key="viewer_name_input",
+        help="Used to keep your own search history and favorites separate from your colleagues'. Resets if you close this browser tab.",
+    )
+    st.session_state.viewer_name = name_input.strip()
+ 
+viewer_email = st.session_state.get("viewer_name") or None
+ 
 docs = index.list_documents()
  
 # ---------------------------------------------------------------------------
@@ -427,8 +453,8 @@ docs = index.list_documents()
 # ---------------------------------------------------------------------------
 storage_ok = store.mode == "drive"
 if viewer_email:
-    initials = "".join(p[0] for p in re.split(r"[.\-_@]", viewer_email) if p)[:2].upper()
-    user_badge = f"<div style='width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;'>{initials}</div>"
+    initials = "".join(p[0] for p in re.split(r"[\s.\-_@]+", viewer_email) if p)[:2].upper()
+    user_badge = f"<div title='{html.escape(viewer_email)}' style='width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;'>{initials}</div>"
 else:
     user_badge = "<div style='font-size:13px;opacity:0.8;'>Guest</div>"
  
@@ -664,7 +690,7 @@ if view == "search":
             with col_recent:
                 st.markdown("<div style='font-size:15px;font-weight:700;color:#1B2440;margin-bottom:6px;'>Recent Searches</div>", unsafe_allow_html=True)
                 if not viewer_email:
-                    st.caption("Sign in (open the app's restricted link) to keep a history of your searches.")
+                    st.caption("Enter your name in the sidebar to keep a history of your searches.")
                 else:
                     recent = user_data.get_history(store, viewer_email, limit=6)
                     if not recent:
@@ -789,10 +815,7 @@ if view == "search":
 elif view == "history":
     st.markdown("<div style='font-size:22px;font-weight:700;color:#1B2440;margin-bottom:12px;'>🕐 My History</div>", unsafe_allow_html=True)
     if not viewer_email:
-        st.info(
-            "History is saved per signed-in person. Open the app through the restricted "
-            "link and sign in with your Google account to start building your history."
-        )
+        st.info("Enter your name in the sidebar (under the navigation) to start building your history.")
     else:
         history = user_data.get_history(store, viewer_email)
         if not history:
@@ -813,10 +836,7 @@ elif view == "history":
 elif view == "favorites":
     st.markdown("<div style='font-size:22px;font-weight:700;color:#1B2440;margin-bottom:12px;'>☆ Favorites</div>", unsafe_allow_html=True)
     if not viewer_email:
-        st.info(
-            "Favorites are saved per signed-in person. Open the app through the restricted "
-            "link and sign in with your Google account to start saving pages."
-        )
+        st.info("Enter your name in the sidebar (under the navigation) to start saving pages.")
     else:
         favorites = user_data.get_favorites(store, viewer_email)
         if not favorites:
@@ -856,11 +876,12 @@ elif view == "about":
             + """. Use the category cards or the Category filter on the Search page to
             browse by type.
  
-            **My History / Favorites** — signed-in colleagues get a private, per-person
-            search history and a list of starred pages, saved alongside the shared
-            library. These need the app to be opened through its access-restricted
-            link (Google sign-in); outside of that there's no identity to save them
-            under.
+            **My History / Favorites** — enter your name in the sidebar (under the
+            navigation) to get a private, per-person search history and a list of
+            starred pages, saved alongside the shared library under that name.
+            It's not a real login (nothing stops someone from typing a colleague's
+            name), so please only use your own name -- everyone's history and
+            favorites stay separate as long as everyone does.
  
             **Adding or removing documents** — anyone with access to this app can
             upload or delete PDFs from the Document library (bottom of the Search
