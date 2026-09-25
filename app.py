@@ -421,9 +421,6 @@ with st.sidebar:
             st.rerun()
  
 docs = index.list_documents()
-doc_options = {"All documents": None}
-for d in docs:
-    doc_options[d["filename"]] = d["doc_id"]
  
 # ---------------------------------------------------------------------------
 # Top header (branded bar within the main content area)
@@ -519,7 +516,12 @@ if view == "search":
         category_options.index(initial_category) if initial_category in category_options else 0
     )
  
-    col_q, col_doc, col_cat, col_btn = st.columns([3, 1, 1, 1])
+    # Category comes before Document in both the layout and the code: which
+    # documents even make sense to narrow to depends on the chosen category,
+    # so the category has to be picked first -- picking "Service Manual"
+    # then only shows service manuals in "Search within", instead of the
+    # full document list with mostly-irrelevant entries in it.
+    col_q, col_cat, col_doc, col_btn = st.columns([3, 1, 1, 1])
     with col_q:
         query = st.text_input(
             "Search",
@@ -528,10 +530,6 @@ if view == "search":
             label_visibility="collapsed",
             key=f"search_box_{st.session_state.search_widget_key}",
         )
-    with col_doc:
-        scope_label = st.selectbox(
-            "Search within", list(doc_options.keys()), label_visibility="collapsed"
-        )
     with col_cat:
         category_label = st.selectbox(
             "Category",
@@ -539,6 +537,19 @@ if view == "search":
             index=default_cat_index,
             label_visibility="collapsed",
             key=f"category_select_{st.session_state.category_widget_key}",
+        )
+ 
+    if category_label != "All categories":
+        docs_in_scope = [d for d in docs if d.get("category", "Uncategorized") == category_label]
+    else:
+        docs_in_scope = docs
+    doc_options = {"All documents": None}
+    for d in docs_in_scope:
+        doc_options[d["filename"]] = d["doc_id"]
+ 
+    with col_doc:
+        scope_label = st.selectbox(
+            "Search within", list(doc_options.keys()), label_visibility="collapsed"
         )
     with col_btn:
         st.button("🔍 Search", use_container_width=True)
