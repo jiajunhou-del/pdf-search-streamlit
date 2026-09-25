@@ -101,46 +101,36 @@ st.markdown(
         font-weight: 600;
     }
  
-    /* Clickable cards: category cards ("Popular search categories") and
-       the Recent Searches / My History rows all use the same trick, so
-       they share this one CSS block (three parallel key prefixes --
-       catcard_/catbtn_, recentcard_/recentbtn_, myhistcard_/myhistbtn_ --
-       each pair deliberately non-overlapping as substrings of each
-       other, so the "*btn_" selectors below don't also match their own
-       "*card_" wrapper). The colored/white look comes from a markdown
-       block rendered above a button, inside a st.container(key=...) --
-       that key gives Streamlit's wrapper div a stable "st-key-<key>"
-       class to target here. The real st.button is stretched over the
-       whole card and made invisible, so clicking anywhere on the card --
-       not just a visible label -- triggers it. */
-    div[class*="st-key-catcard_"],
-    div[class*="st-key-recentcard_"],
-    div[class*="st-key-myhistcard_"] {
+    /* Category cards ("Popular search categories"): the colored look comes
+       from a markdown block rendered above a button, inside each card's
+       own st.container(key=f"catcard_{name}") -- that key gives
+       Streamlit's wrapper div a stable "st-key-catcard_<name>" class to
+       target here. The real st.button (key=f"catbtn_{name}", a
+       deliberately different prefix so its own "st-key-catbtn_<name>"
+       class can be targeted without also matching the outer card by
+       substring) is stretched over the whole card and made invisible, so
+       clicking anywhere on the card -- not just a visible "Browse" label
+       -- triggers it. (Recent Searches / My History rows used to share
+       this same trick, but went back to a plain bordered container with
+       a normal, visible "Search again" button per feedback.) */
+    div[class*="st-key-catcard_"] {
         position: relative;
         border: none !important;
         padding: 0 !important;
         margin-bottom: 14px;
         transition: transform 0.05s ease-in-out;
     }
-    div[class*="st-key-catcard_"]:has(button:active),
-    div[class*="st-key-recentcard_"]:has(button:active),
-    div[class*="st-key-myhistcard_"]:has(button:active) {
+    div[class*="st-key-catcard_"]:has(button:active) {
         transform: scale(0.99);
     }
-    div[class*="st-key-catbtn_"],
-    div[class*="st-key-recentbtn_"],
-    div[class*="st-key-myhistbtn_"] {
+    div[class*="st-key-catbtn_"] {
         position: absolute;
         inset: 0;
     }
-    div[class*="st-key-catbtn_"] .stButton,
-    div[class*="st-key-recentbtn_"] .stButton,
-    div[class*="st-key-myhistbtn_"] .stButton {
+    div[class*="st-key-catbtn_"] .stButton {
         height: 100%;
     }
-    div[class*="st-key-catbtn_"] .stButton > button,
-    div[class*="st-key-recentbtn_"] .stButton > button,
-    div[class*="st-key-myhistbtn_"] .stButton > button {
+    div[class*="st-key-catbtn_"] .stButton > button {
         width: 100%;
         height: 100%;
         min-height: 0;
@@ -327,12 +317,21 @@ def _scope_badge_html(scope_filename: str) -> str:
  
  
 def _render_history_row(entry: dict, key_prefix: str, index: int):
-    """One clickable card for a past search -- used by both the Search
-    page's "Recent Searches" panel and the full "My History" list, so the
-    two stay visually consistent. The whole card is clickable (same
-    invisible-button-over-a-styled-container trick as the category cards
-    above) rather than a separate small "Search again" button, to match
-    the reference look of a plain tappable list row."""
+    """One card for a past search -- used by both the Search page's
+    "Recent Searches" panel and the full "My History" list, so the two
+    stay visually consistent.
+ 
+    Every piece of HTML built here is assembled as a *single-line* string
+    (no multi-line triple-quoted blocks). That's not just style: when the
+    query has no category and wasn't scoped to a document, `badges` is an
+    empty string, and putting that on its own line inside a multi-line
+    f-string left a whitespace-only line in the middle of the HTML --
+    which Streamlit's markdown renderer (like most Markdown parsers)
+    treats as a paragraph break, splitting one HTML block into two and
+    printing everything after the break as literal escaped text instead
+    of rendering it. Keeping each chunk on one line sidesteps that
+    entirely, blank interpolated values or not.
+    """
     badges = ""
     category = entry.get("category")
     if category:
@@ -342,33 +341,20 @@ def _render_history_row(entry: dict, key_prefix: str, index: int):
         badges += _scope_badge_html(scope_filename)
     result_count = entry.get("result_count", 0)
     doc_label = f"{result_count} document{'s' if result_count != 1 else ''}"
-    card_key = f"{key_prefix}card_{index}"
-    btn_key = f"{key_prefix}btn_{index}"
-    with st.container(key=card_key):
-        st.markdown(
-            f"""
-            <div style="background:#FFFFFF;border:1px solid #E9EDF3;border-radius:12px;
-              padding:14px 16px;box-shadow:0 1px 2px rgba(16,24,40,0.04);">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
-                <div style="display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap;">
-                  <span style="font-size:15px;color:#2563EB;flex-shrink:0;">🔍</span>
-                  <span style="font-size:14px;font-weight:600;color:#1B2440;">{html.escape(entry['query'])}</span>
-                  {badges}
-                </div>
-                <div style="display:flex;align-items:center;gap:12px;flex-shrink:0;">
-                  <div style="text-align:right;line-height:1.4;">
-                    <div style="font-size:12px;color:#374151;">{doc_label}</div>
-                    <div style="font-size:11px;color:#9CA3AF;">{user_data.humanize_ago(entry['ts'])}</div>
-                  </div>
-                  <span style="font-size:15px;color:#9CA3AF;">→</span>
-                </div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        if st.button("Search again", key=btn_key, use_container_width=True):
-            _goto_search(prefill_query=entry["query"])
+    with st.container(border=True):
+        col_text, col_btn = st.columns([5, 1.3])
+        with col_text:
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:8px;flex-wrap:wrap;'>"
+                f"<span style='font-size:15px;color:#2563EB;'>🔍</span>"
+                f"<span style='font-size:14px;font-weight:600;color:#1B2440;'>{html.escape(entry['query'])}</span>"
+                f"{badges}</div>"
+                f"<div style='font-size:12px;color:#6b7280;margin-top:4px;'>{doc_label} · {user_data.humanize_ago(entry['ts'])}</div>",
+                unsafe_allow_html=True,
+            )
+        with col_btn:
+            if st.button("Search again", key=f"{key_prefix}_{index}", use_container_width=True):
+                _goto_search(prefill_query=entry["query"])
  
  
 def _favorite_toggle(doc_id: str, filename: str, page_number: int, widget_id: str):
