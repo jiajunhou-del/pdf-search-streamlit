@@ -33,16 +33,16 @@ st.set_page_config(page_title="Technical Manual Search", page_icon="🔧", layou
 # doubles as the choice list offered at upload time and in the category
 # filter dropdown -- one single source of truth for all three.
 CATEGORY_META = {
-    # "bg" is the light tint used for small inline badges (search result
-    # cards, About page); "cardbg" is a noticeably deeper fill used for the
-    # big "Popular search categories" cards on the Search home view, where
-    # a barely-there tint reads as washed out against a full-size card.
-    "Service Manual": {"icon": "🔧", "bg": "#EFF6FF", "cardbg": "#DBEAFE", "fg": "#1D4ED8", "sub": "Service & maintenance"},
-    "Parts Book": {"icon": "⚙️", "bg": "#ECFDF5", "cardbg": "#BBF7D0", "fg": "#047857", "sub": "Parts & components"},
-    "Specifications": {"icon": "📄", "bg": "#F5F3FF", "cardbg": "#E9D5FF", "fg": "#6D28D9", "sub": "Specs & performance"},
-    "Error Code": {"icon": "⚠️", "bg": "#FFF7ED", "cardbg": "#FED7AA", "fg": "#C2410C", "sub": "Troubleshooting"},
-    "Procedure": {"icon": "📖", "bg": "#FDF2F8", "cardbg": "#FBCFE8", "fg": "#BE185D", "sub": "Operating procedures"},
-    "Installation": {"icon": "🔗", "bg": "#ECFEFF", "cardbg": "#A5F3FC", "fg": "#0E7490", "sub": "Setup & connection"},
+    # "bg" is a soft, muted tint used both for small inline badges (search
+    # result cards, About page) and as the full-card fill on the "Popular
+    # search categories" cards -- tried a noticeably deeper/brighter fill
+    # there first, but it read as too loud, so this is the gentler version.
+    "Service Manual": {"icon": "🔧", "bg": "#EEF3FC", "fg": "#3457A6", "sub": "Service & maintenance"},
+    "Parts Book": {"icon": "⚙️", "bg": "#EBF7EF", "fg": "#2E7D4F", "sub": "Parts & components"},
+    "Specifications": {"icon": "📄", "bg": "#F3F0FB", "fg": "#6647A8", "sub": "Specs & performance"},
+    "Error Code": {"icon": "⚠️", "bg": "#FCF1E7", "fg": "#B45F1E", "sub": "Troubleshooting"},
+    "Procedure": {"icon": "📖", "bg": "#FBEEF4", "fg": "#A83E71", "sub": "Operating procedures"},
+    "Installation": {"icon": "🔗", "bg": "#EAF7F8", "fg": "#1F7A8C", "sub": "Setup & connection"},
 }
 CATEGORY_NAMES = list(CATEGORY_META.keys())
  
@@ -114,6 +114,7 @@ st.markdown(
         position: relative;
         border: none !important;
         padding: 0 !important;
+        margin-bottom: 14px;
         transition: transform 0.05s ease-in-out;
     }
     div[class*="st-key-catcard_"]:has(button:active) {
@@ -643,7 +644,7 @@ if view == "search":
     category_counts = Counter(d.get("category", "Uncategorized") for d in docs)
     cat_rows = [CATEGORY_NAMES[i:i + 3] for i in range(0, len(CATEGORY_NAMES), 3)]
     for row in cat_rows:
-        cols = st.columns(3)
+        cols = st.columns(3, gap="medium")
         for col, cat_name in zip(cols, row):
             meta = CATEGORY_META[cat_name]
             count = category_counts.get(cat_name, 0)
@@ -657,17 +658,17 @@ if view == "search":
                 with st.container(key=f"catcard_{cat_name}"):
                     st.markdown(
                         f"""
-                        <div style="background:{meta['cardbg']};border-radius:14px;padding:14px 16px;">
-                          <div style="display:flex;align-items:center;gap:10px;">
-                            <div style="width:38px;height:38px;border-radius:10px;background:rgba(255,255,255,0.7);
+                        <div style="background:{meta['bg']};border-radius:14px;padding:16px 18px;">
+                          <div style="display:flex;align-items:center;gap:12px;">
+                            <div style="width:38px;height:38px;border-radius:10px;background:rgba(255,255,255,0.8);
                               display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">
                               {meta['icon']}
                             </div>
                             <div style="flex:1;min-width:0;">
                               <div style="font-size:14px;font-weight:700;color:{meta['fg']};">{html.escape(cat_name)}</div>
-                              <div style="font-size:12px;color:{meta['fg']};opacity:0.75;">{meta['sub']} · {count} doc{'s' if count != 1 else ''}</div>
+                              <div style="font-size:12px;color:{meta['fg']};opacity:0.7;">{meta['sub']} · {count} doc{'s' if count != 1 else ''}</div>
                             </div>
-                            <div style="font-size:16px;color:{meta['fg']};opacity:0.6;">→</div>
+                            <div style="font-size:16px;color:{meta['fg']};opacity:0.5;">→</div>
                           </div>
                         </div>
                         """,
