@@ -33,12 +33,16 @@ st.set_page_config(page_title="Technical Manual Search", page_icon="🔧", layou
 # doubles as the choice list offered at upload time and in the category
 # filter dropdown -- one single source of truth for all three.
 CATEGORY_META = {
-    "Service Manual": {"icon": "🔧", "bg": "#EFF6FF", "fg": "#2563EB", "sub": "Service & maintenance"},
-    "Parts Book": {"icon": "⚙️", "bg": "#ECFDF5", "fg": "#059669", "sub": "Parts & components"},
-    "Specifications": {"icon": "📄", "bg": "#F5F3FF", "fg": "#7C3AED", "sub": "Specs & performance"},
-    "Error Code": {"icon": "⚠️", "bg": "#FFF7ED", "fg": "#EA580C", "sub": "Troubleshooting"},
-    "Procedure": {"icon": "📖", "bg": "#FDF2F8", "fg": "#DB2777", "sub": "Operating procedures"},
-    "Installation": {"icon": "🔗", "bg": "#ECFEFF", "fg": "#0891B2", "sub": "Setup & connection"},
+    # "bg" is the light tint used for small inline badges (search result
+    # cards, About page); "cardbg" is a noticeably deeper fill used for the
+    # big "Popular search categories" cards on the Search home view, where
+    # a barely-there tint reads as washed out against a full-size card.
+    "Service Manual": {"icon": "🔧", "bg": "#EFF6FF", "cardbg": "#DBEAFE", "fg": "#1D4ED8", "sub": "Service & maintenance"},
+    "Parts Book": {"icon": "⚙️", "bg": "#ECFDF5", "cardbg": "#BBF7D0", "fg": "#047857", "sub": "Parts & components"},
+    "Specifications": {"icon": "📄", "bg": "#F5F3FF", "cardbg": "#E9D5FF", "fg": "#6D28D9", "sub": "Specs & performance"},
+    "Error Code": {"icon": "⚠️", "bg": "#FFF7ED", "cardbg": "#FED7AA", "fg": "#C2410C", "sub": "Troubleshooting"},
+    "Procedure": {"icon": "📖", "bg": "#FDF2F8", "cardbg": "#FBCFE8", "fg": "#BE185D", "sub": "Operating procedures"},
+    "Installation": {"icon": "🔗", "bg": "#ECFEFF", "cardbg": "#A5F3FC", "fg": "#0E7490", "sub": "Setup & connection"},
 }
 CATEGORY_NAMES = list(CATEGORY_META.keys())
  
@@ -95,6 +99,42 @@ st.markdown(
         background: #EFF6FF;
         color: #2563EB;
         font-weight: 600;
+    }
+ 
+    /* Category cards ("Popular search categories"): the colored look comes
+       from the markdown block rendered above the button, in each card's own
+       st.container(key=f"catcard_{name}") -- that key gives Streamlit's
+       wrapper div a stable "st-key-catcard_<name>" class to target here.
+       The real st.button (key=f"catbtn_{name}", a deliberately different
+       prefix so its own "st-key-catbtn_<name>" class can be targeted
+       without also matching the outer card by substring) is stretched over
+       the whole card and made invisible, so clicking anywhere on the
+       colored card -- not just a visible "Browse" label -- triggers it. */
+    div[class*="st-key-catcard_"] {
+        position: relative;
+        border: none !important;
+        padding: 0 !important;
+        transition: transform 0.05s ease-in-out;
+    }
+    div[class*="st-key-catcard_"]:has(button:active) {
+        transform: scale(0.99);
+    }
+    div[class*="st-key-catbtn_"] {
+        position: absolute;
+        inset: 0;
+    }
+    div[class*="st-key-catbtn_"] .stButton {
+        height: 100%;
+    }
+    div[class*="st-key-catbtn_"] .stButton > button {
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        opacity: 0;
+        cursor: pointer;
+        margin: 0;
+        padding: 0;
+        border: none;
     }
     </style>
     """,
@@ -608,23 +648,32 @@ if view == "search":
             meta = CATEGORY_META[cat_name]
             count = category_counts.get(cat_name, 0)
             with col:
-                with st.container(border=True):
+                # st.container(key=...) gets a stable "st-key-<key>" CSS
+                # class (see the CSS block near the top of this file) --
+                # that's what lets the whole colored card act as one
+                # clickable unit: the real st.button underneath is
+                # stretched to cover it and made invisible, while this
+                # markdown supplies the actual look.
+                with st.container(key=f"catcard_{cat_name}"):
                     st.markdown(
                         f"""
-                        <div style="display:flex;align-items:center;gap:10px;">
-                          <div style="width:38px;height:38px;border-radius:10px;background:{meta['bg']};
-                            display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">
-                            {meta['icon']}
-                          </div>
-                          <div>
-                            <div style="font-size:14px;font-weight:600;color:#1B2440;">{html.escape(cat_name)}</div>
-                            <div style="font-size:12px;color:#6b7280;">{meta['sub']} · {count} doc{'s' if count != 1 else ''}</div>
+                        <div style="background:{meta['cardbg']};border-radius:14px;padding:14px 16px;">
+                          <div style="display:flex;align-items:center;gap:10px;">
+                            <div style="width:38px;height:38px;border-radius:10px;background:rgba(255,255,255,0.7);
+                              display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">
+                              {meta['icon']}
+                            </div>
+                            <div style="flex:1;min-width:0;">
+                              <div style="font-size:14px;font-weight:700;color:{meta['fg']};">{html.escape(cat_name)}</div>
+                              <div style="font-size:12px;color:{meta['fg']};opacity:0.75;">{meta['sub']} · {count} doc{'s' if count != 1 else ''}</div>
+                            </div>
+                            <div style="font-size:16px;color:{meta['fg']};opacity:0.6;">→</div>
                           </div>
                         </div>
                         """,
                         unsafe_allow_html=True,
                     )
-                    if st.button("Browse →", key=f"catcard_{cat_name}", use_container_width=True):
+                    if st.button("Browse", key=f"catbtn_{cat_name}", use_container_width=True):
                         _goto_search(prefill_category=cat_name)
  
     st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
