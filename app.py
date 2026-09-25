@@ -706,17 +706,18 @@ if view == "search":
                 with st.container(key=f"catcard_{cat_name}"):
                     st.markdown(
                         f"""
-                        <div style="background:{meta['bg']};border-radius:14px;padding:16px 18px;">
+                        <div style="background:#FFFFFF;border:1px solid #E9EDF3;border-radius:14px;
+                          padding:16px 18px;box-shadow:0 1px 2px rgba(16,24,40,0.04);">
                           <div style="display:flex;align-items:center;gap:12px;">
-                            <div style="width:38px;height:38px;border-radius:10px;background:rgba(255,255,255,0.8);
+                            <div style="width:38px;height:38px;border-radius:10px;background:{meta['fg']};
                               display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">
                               {meta['icon']}
                             </div>
                             <div style="flex:1;min-width:0;">
                               <div style="font-size:14px;font-weight:700;color:{meta['fg']};">{html.escape(cat_name)}</div>
-                              <div style="font-size:12px;color:{meta['fg']};opacity:0.7;">{meta['sub']} · {count} doc{'s' if count != 1 else ''}</div>
+                              <div style="font-size:12px;color:#6B7280;">{meta['sub']} · {count} doc{'s' if count != 1 else ''}</div>
                             </div>
-                            <div style="font-size:16px;color:{meta['fg']};opacity:0.5;">→</div>
+                            <div style="font-size:16px;color:#9CA3AF;">→</div>
                           </div>
                         </div>
                         """,
@@ -1005,3 +1006,4 @@ elif view == "about":
             """
         )
  
+
