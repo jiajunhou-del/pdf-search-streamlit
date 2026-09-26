@@ -145,6 +145,16 @@ class DriveStore:
         self.service = build("drive", "v3", credentials=creds, cache_discovery=False)
         self._index_file_id_cache = None
  
+    # Every .list()/.create()/.get_media()/.update()/.delete() call below
+    # also passes supportsAllDrives=True (and, for .list(), also
+    # includeItemsFromAllDrives=True). Without these, the Drive API quietly
+    # assumes folder_id lives in someone's My Drive: a plain files().list()
+    # scoped to a folder that's actually inside a Shared Drive just comes
+    # back empty (no error -- it looks like "the folder has no files"),
+    # and files().create()/update()/delete() targeting a Shared Drive
+    # folder fail outright. Needed as soon as drive_folder_id points into a
+    # Shared Drive (共有ドライブ) instead of someone's personal My Drive.
+    #
     # Every .execute()/.next_chunk() call below passes num_retries=3.
     # Without it, googleapiclient's default is 0 retries -- so a single
     # transient network hiccup talking to Google's servers (observed in
@@ -162,7 +172,8 @@ class DriveStore:
             "and trashed = false"
         )
         res = self.service.files().list(
-            q=q, fields="files(id, name)", spaces="drive"
+            q=q, fields="files(id, name)", spaces="drive",
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
         ).execute(num_retries=3)
         files = res.get("files", [])
         return files[0]["id"] if files else None
@@ -170,7 +181,8 @@ class DriveStore:
     def list_files(self):
         q = f"'{self.folder_id}' in parents and trashed = false"
         res = self.service.files().list(
-            q=q, fields="files(id, name)", spaces="drive", pageSize=1000
+            q=q, fields="files(id, name)", spaces="drive", pageSize=1000,
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
         ).execute(num_retries=3)
         return [
             f for f in res.get("files", [])
@@ -184,14 +196,16 @@ class DriveStore:
         media = MediaIoBaseUpload(io.BytesIO(data), mimetype="application/pdf")
         meta = {"name": filename, "parents": [self.folder_id]}
         created = self.service.files().create(
-            body=meta, media_body=media, fields="id"
+            body=meta, media_body=media, fields="id", supportsAllDrives=True,
         ).execute(num_retries=3)
         return created["id"]
  
     def download_bytes(self, file_id: str) -> bytes:
         from googleapiclient.http import MediaIoBaseDownload
  
-        request = self.service.files().get_media(fileId=file_id)
+        request = self.service.files().get_media(
+            fileId=file_id, supportsAllDrives=True,
+        )
         buf = io.BytesIO()
         downloader = MediaIoBaseDownload(buf, request)
         done = False
@@ -200,7 +214,9 @@ class DriveStore:
         return buf.getvalue()
  
     def delete_file(self, file_id: str):
-        self.service.files().delete(fileId=file_id).execute(num_retries=3)
+        self.service.files().delete(
+            fileId=file_id, supportsAllDrives=True,
+        ).execute(num_retries=3)
  
     def load_index_bytes(self):
         return self.load_named_bytes(INDEX_FILENAME)
@@ -225,12 +241,12 @@ class DriveStore:
         existing_id = self._find(name)
         if existing_id:
             self.service.files().update(
-                fileId=existing_id, media_body=media
+                fileId=existing_id, media_body=media, supportsAllDrives=True,
             ).execute(num_retries=3)
         else:
             meta = {"name": name, "parents": [self.folder_id]}
             self.service.files().create(
-                body=meta, media_body=media
+                body=meta, media_body=media, supportsAllDrives=True,
             ).execute(num_retries=3)
  
  
