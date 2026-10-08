@@ -34,6 +34,31 @@ hundreds of PDFs: on startup the app downloads that one small index file,
 not every PDF. Full PDF bytes / page thumbnails are only fetched lazily,
 the first time something actually needs to view that page or file, and
 cached locally for the life of the running instance.
+ 
+A document's doc_id (used throughout search_engine.py/app.py) is its
+FILENAME, in both modes -- not a raw Google Drive file id. This used to
+be "whatever id the file has in the store" (the Drive file id in Drive
+mode), which seemed natural since that's a real, unique, stable-looking
+identifier Drive hands you for free. In practice, for at least one real
+folder, it was not stable: a file already proven to exist and download
+fine (e.g. right after the "Rebuild search index" tool in app.py just
+finished downloading it) was later found to 404 with "File not found" --
+same name, same content, but a different underlying id -- most likely
+because other people/computers also have this Shared Drive mounted via
+Google Drive for Desktop and were simultaneously reorganizing it, which
+can replace a file (new id) rather than edit it in place, with nothing
+about that visible from the Drive UI a person actually looks at. A cached
+id can silently go stale at any moment with no warning and no action by
+this app. Resolving by filename *at the moment of use* instead of trusting
+a ever-so-slightly-stale cached id -- see DriveStore.resolve_doc_id below,
+called from app.py's _download_bytes -- means a renamed-under-the-hood
+file keeps working without needing anyone to notice and click "Rebuild".
+The trade-off, accepted deliberately: two files with the exact same name
+in the configured folder become ambiguous (whichever one Drive's API
+happens to list first wins) -- acceptable here since the actual manuals
+have distinct names; it's only ever the generated search_index.pkl itself
+that has been observed to collide, and that one is looked up separately
+by a fixed name, not through doc_id.
 """
 import io
 import os
@@ -70,6 +95,13 @@ class LocalStore:
  
     def _path(self, name):
         return os.path.join(LOCAL_CACHE_DIR, name)
+ 
+    def resolve_doc_id(self, doc_id: str) -> str:
+        """doc_id already IS the filename in local mode -- nothing to look
+        up. Exists so app.py can call this uniformly regardless of which
+        store is active; see the module docstring for why it matters in
+        Drive mode."""
+        return doc_id
  
     def list_files(self):
         out = []
@@ -165,6 +197,24 @@ class DriveStore:
     # generic "Oh no. Error running app" page. num_retries makes
     # googleapiclient retry that kind of transient failure internally
     # with exponential backoff before giving up.
+ 
+    def resolve_doc_id(self, doc_id: str) -> str:
+        """Looks up the CURRENT real Drive file id for a document, by
+        filename (doc_id), instead of trusting an id cached from an
+        earlier search index build -- see the module docstring for why
+        that matters. Raises FileNotFoundError (with a message naming the
+        file) if nothing by that name exists in the folder right now, so
+        callers' existing `except Exception as e: st.error(...)` handling
+        around preview/download keeps working unchanged."""
+        file_id = self._find(doc_id)
+        if not file_id:
+            raise FileNotFoundError(
+                f'No file named "{doc_id}" found in the configured Drive folder '
+                "right now -- it may have been deleted, renamed, or moved. If you "
+                "can see it in Drive under that exact name, try \"Rebuild search "
+                "index from Drive\" in the Document library section below."
+            )
+        return file_id
  
     def _find(self, name: str):
         q = (
