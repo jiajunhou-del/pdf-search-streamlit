@@ -529,15 +529,21 @@ def _goto_search(prefill_query: str = None, prefill_category: str = None):
 # With that always-on listening, though, *every* sentence anyone says
 # near the laptop would otherwise get typed into the search box --
 # coworkers talking, a PA announcement, radio chatter. So once listening
-# has started it sits idle until an utterance contains the wake word
-# ("guide"); only the words *after* it are treated as a command, and
-# anything without the wake word is ignored outright (briefly shown in
+# has started it sits idle until an utterance starts with the wake word
+# ("guide"); anything without it is ignored outright (briefly shown in
 # the status line so the mic's obviously still alive, but never searched
-# or spoken). Say the wake word and the query together in one breath,
-# e.g. "guide BQ300 service manual". "stop"/"exit"/"quit"/"cancel" are
-# the one exception -- they work on their own, without the wake word, as
-# an unconditional way to pause listening if anything seems to be
-# misbehaving.
+# or spoken). Saying "guide" *opens a session*, though, rather than
+# gating one single command: every utterance after that is treated as a
+# query with no need to repeat "guide", right up until "stop" is said or
+# a couple of minutes pass with nothing recognized. Earlier this instead
+# required the wake word before every command, which fought how people
+# actually talk -- continuous recognition splits speech into separate
+# utterances on any natural pause, so "Guide... [breath]... HT300 fade
+# stagger section" arrives as two utterances, and the second one (the
+# actual request) doesn't start with "guide" and would otherwise be
+# silently discarded as background noise. "stop"/"exit"/"quit"/"cancel"
+# work on their own, without the wake word, as an unconditional way to
+# end the session if anything seems to be misbehaving.
 #
 # Worth the person knowing, not just coded around: always-on listening
 # means audio is continuously sent to the browser's speech recognition
@@ -662,14 +668,12 @@ if (!SR) {
     try { recog.stop(); } catch (err) {}
   }
  
-  // Only text *after* the wake word is ever treated as a command -- a
-  // stray "guide" said on its own (nothing follows) is acknowledged but
-  // does nothing, rather than silently waiting for a second utterance,
-  // which would need extra state and be easy to leave stuck. The wake
-  // word has to be the *first* word, not just anywhere in the sentence --
-  // tested against real sentences like "please guide me through this"
-  // during development, which would otherwise misfire as a search for
-  // "me" if "guide" were matched anywhere.
+  // The wake word has to be the *first* word of the utterance, not just
+  // anywhere in the sentence -- tested against real sentences like
+  // "please guide me through this" during development, which would
+  // otherwise misfire as a search for "me" if "guide" were matched
+  // anywhere. Returns null (no wake word here at all), '' (wake word
+  // said alone), or the text after it.
   function extractCommand(text) {
     const t = text.trim();
     const lower = t.toLowerCase();
@@ -681,35 +685,52 @@ if (!SR) {
     return t.slice(WAKE_WORD.length).replace(/^[\\s,.:;!-]+/, '').trim();
   }
  
-  // Set after a bare "guide" (nothing following it in that same
-  // utterance) -- continuous recognition segments speech into separate
-  // utterances on any natural pause, so "Guide... [breath]... HT300 fade
-  // stagger section" arrives as TWO utterances, not one. Without this,
-  // the second utterance doesn't start with the wake word and would
-  // silently be discarded as background noise, even though the person
-  // did everything right. While armed, the *next* utterance is taken as
-  // the command outright, wake word or not; it disarms itself after a
-  // few seconds so a stray sentence long after an old "guide" doesn't
-  // get mistaken for the command that never came.
-  let awaitingCommand = false;
-  let awaitingTimer = null;
+  // Saying "guide" doesn't gate a single command -- it opens a session
+  // where *every* following utterance is a query, exactly like clicking
+  // "start" used to in the click-based hands-free mode, right up until
+  // "stop" is said. This went through one earlier design (wake word
+  // required before every single command) that turned out to fight how
+  // people actually talk: continuous recognition splits speech into
+  // separate utterances on any natural pause, so "Guide... [breath]...
+  // HT300 fade stagger section" arrives as two utterances, and requiring
+  // the wake word on each one meant the second utterance (the actual
+  // request) kept getting silently discarded as background noise. A
+  // session auto-closes after a couple of minutes of nothing recognized,
+  // so it doesn't sit "open" (treating ambient chatter as searches)
+  // indefinitely if the person walks away without saying "stop".
+  let sessionActive = false;
+  let sessionTimer = null;
+  const SESSION_IDLE_MS = 120000;
  
-  function armAwaitingCommand() {
-    awaitingCommand = true;
-    clearTimeout(awaitingTimer);
-    awaitingTimer = setTimeout(() => { awaitingCommand = false; }, 8000);
+  function startSession() {
+    sessionActive = true;
+    armSessionTimeout();
+  }
+ 
+  function endSession() {
+    sessionActive = false;
+    clearTimeout(sessionTimer);
+  }
+ 
+  function armSessionTimeout() {
+    clearTimeout(sessionTimer);
+    sessionTimer = setTimeout(() => {
+      sessionActive = false;
+      statusEl.innerText = 'Session timed out -- say "' + WAKE_WORD + '" to start again.';
+    }, SESSION_IDLE_MS);
   }
  
   function handleUtterance(text) {
     const normalized = text.trim().toLowerCase().replace(/[.!?]+$/, '');
     if (STOP_WORDS.includes(normalized)) {
-      awaitingCommand = false;
+      endSession();
       pauseRecognition('Paused.');
       return;
     }
-    if (awaitingCommand) {
-      awaitingCommand = false;
-      clearTimeout(awaitingTimer);
+    if (sessionActive) {
+      // Already in a session -- no need to repeat the wake word, this
+      // utterance IS the query.
+      armSessionTimeout();
       if (fillParentSearchBox(text)) {
         statusEl.innerText = '✅ Searching for "' + text + '"';
       }
@@ -723,16 +744,17 @@ if (!SR) {
       statusEl.innerText = '👂 (' + text + ')';
       return;
     }
-    if (!command) {
-      // Wake word said on its own, nothing after it (yet) -- arm the
-      // follow-up window instead of assuming there's nothing more coming.
-      statusEl.innerText = 'Yes? Go ahead.';
+    // Wake word heard -- open the session either way. If the query came
+    // in the same breath ("guide BQ300"), run it immediately instead of
+    // waiting for a separate utterance that may never come.
+    startSession();
+    if (command) {
+      if (fillParentSearchBox(command)) {
+        statusEl.innerText = '✅ Searching for "' + command + '"';
+      }
+    } else {
+      statusEl.innerText = 'Listening -- go ahead (no need to say "' + WAKE_WORD + '" again).';
       speak('Yes, go ahead.');
-      armAwaitingCommand();
-      return;
-    }
-    if (fillParentSearchBox(command)) {
-      statusEl.innerText = '✅ Searching for "' + command + '"';
     }
   }
  
@@ -1490,3 +1512,4 @@ elif view == "about":
             """
         )
  
+
