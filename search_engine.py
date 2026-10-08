@@ -1,1898 +1,224 @@
 """
-Streamlit version of the PDF technical-manual search tool.
+Same TF-IDF search core as the original FastAPI prototype, adapted to
+persist through a pluggable store (drive_store.py) instead of a local
+pickle file directly -- so the index can live in Google Drive alongside
+the PDFs it describes.
  
-Why this exists alongside the original FastAPI+HTML version: deploying
-this on Streamlit Community Cloud gives every user a real, trusted HTTPS
-address automatically (no self-signed certificate, no dependence on one
-PC's IP address staying the same) -- which is exactly the pair of
-problems that kept coming up with the original self-hosted setup. The
-PDF library itself is *not* stored on Streamlit's disk (which is wiped
-whenever the app sleeps or is redeployed); see drive_store.py for how it
-is kept in a shared Google Drive folder instead.
- 
-Run locally with:   streamlit run app.py
-Deploy: push this folder to a GitHub repo and connect it on
-share.streamlit.io -- see README.md for the full checklist (Google Drive
-service account, secrets.toml, restricting who can open the app).
+doc_id is a document's filename (same in both local and Drive mode -- see
+drive_store.py's module docstring for why it's the filename and not a raw
+Drive file id). Resolving that to an actual storage location/real Drive
+file id happens in drive_store.py, at the point of use, not here.
 """
-import html
-import re
-from collections import Counter
+import pickle
+import threading
  
-import streamlit as st
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
  
-from drive_store import get_store
-from pdf_processor import extract_pages, chunk_pages
-from search_engine import SearchIndex
-import user_data
- 
-st.set_page_config(page_title="Technical Manual Search", page_icon="🔧", layout="wide")
- 
-# Fixed set of manual categories. Each maps to an icon + accent color used
-# for the "Popular search categories" cards on the Search home view, and
-# doubles as the choice list offered at upload time and in the category
-# filter dropdown -- one single source of truth for all three.
-CATEGORY_META = {
-    # "bg" is a soft, muted tint used both for small inline badges (search
-    # result cards, About page) and as the full-card fill on the "Popular
-    # search categories" cards -- tried a noticeably deeper/brighter fill
-    # there first, but it read as too loud, so this is the gentler version.
-    "Service Manual": {"icon": "🔧", "bg": "#EEF3FC", "fg": "#3457A6", "sub": "Service & maintenance"},
-    "Parts Book": {"icon": "⚙️", "bg": "#EBF7EF", "fg": "#2E7D4F", "sub": "Parts & components"},
-    "Specifications": {"icon": "📄", "bg": "#F3F0FB", "fg": "#6647A8", "sub": "Specs & performance"},
-    "Error Code": {"icon": "⚠️", "bg": "#FCF1E7", "fg": "#B45F1E", "sub": "Troubleshooting"},
-    "Procedure": {"icon": "📖", "bg": "#FBEEF4", "fg": "#A83E71", "sub": "Operating procedures"},
-    "Installation": {"icon": "🔗", "bg": "#EAF7F8", "fg": "#1F7A8C", "sub": "Setup & connection"},
-}
-CATEGORY_NAMES = list(CATEGORY_META.keys())
- 
-# ---------------------------------------------------------------------------
-# Look and feel. The color palette itself lives in .streamlit/config.toml
-# (Streamlit's own [theme] section -- the supported way to theme buttons,
-# inputs, etc. so it keeps working across Streamlit upgrades). This block
-# only adds the handful of things that theming alone can't do: a nicer
-# font, polish on elements this file builds directly, and the sidebar
-# navigation's "selected item" look.
-# ---------------------------------------------------------------------------
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif; }
- 
-    .stButton > button, .stDownloadButton > button {
-        border-radius: 8px;
-        font-weight: 500;
-        transition: transform 0.05s ease-in-out;
-    }
-    .stButton > button:active, .stDownloadButton > button:active {
-        transform: scale(0.98);
-    }
-    .stTextInput input, div[data-baseweb="select"] > div {
-        border-radius: 8px !important;
-    }
-    div[data-testid="stVerticalBlockBorderWrapper"] {
-        border-radius: 12px !important;
-    }
- 
-    /* Sidebar navigation: plain st.button per item, restyled to read as a
-       left-aligned nav list rather than a row of centered buttons -- the
-       "selected" item uses Streamlit's own primary-button styling (see
-       type="primary" below) instead of hand-rolled active-state CSS, so
-       it keeps working if Streamlit's internals change. */
-    [data-testid="stSidebar"] .stButton > button {
-        text-align: left;
-        justify-content: flex-start;
-        border: none;
-        font-weight: 500;
-        padding: 8px 14px;
-    }
-    [data-testid="stSidebar"] .stButton > button[kind="secondary"] {
-        background: transparent;
-        color: #374151;
-    }
-    [data-testid="stSidebar"] .stButton > button[kind="secondary"]:hover {
-        background: #F3F4F6;
-        color: #111827;
-    }
-    [data-testid="stSidebar"] .stButton > button[kind="primary"] {
-        background: #EFF6FF;
-        color: #2563EB;
-        font-weight: 600;
-    }
- 
-    /* Category cards ("Popular search categories"): the colored look comes
-       from a markdown block rendered above a button, inside each card's
-       own st.container(key=f"catcard_{name}") -- that key gives
-       Streamlit's wrapper div a stable "st-key-catcard_<name>" class to
-       target here. The real st.button (key=f"catbtn_{name}", a
-       deliberately different prefix so its own "st-key-catbtn_<name>"
-       class can be targeted without also matching the outer card by
-       substring) is stretched over the whole card and made invisible, so
-       clicking anywhere on the card -- not just a visible "Browse" label
-       -- triggers it. (Recent Searches / My History rows used to share
-       this same trick, but went back to a plain bordered container with
-       a normal, visible "Search again" button per feedback.) */
-    div[class*="st-key-catcard_"] {
-        position: relative;
-        border: none !important;
-        padding: 0 !important;
-        margin-bottom: 14px;
-        transition: transform 0.05s ease-in-out;
-    }
-    div[class*="st-key-catcard_"]:has(button:active) {
-        transform: scale(0.99);
-    }
-    div[class*="st-key-catbtn_"] {
-        position: absolute;
-        inset: 0;
-    }
-    div[class*="st-key-catbtn_"] .stButton {
-        height: 100%;
-    }
-    div[class*="st-key-catbtn_"] .stButton > button {
-        width: 100%;
-        height: 100%;
-        min-height: 0;
-        opacity: 0;
-        cursor: pointer;
-        margin: 0;
-        padding: 0;
-        border: none;
-    }
- 
-    /* Sidebar: switched from plain white to a dark "instrument panel" look
-       -- a white sidebar on a near-white main background (per feedback)
-       didn't read as a separate area at all. Dark navy + a blue accent
-       (the same blue as primaryColor in config.toml) gives a clear visual
-       boundary and a more "technical tool" feel. Re-declared *after* the
-       light-theme sidebar button rules above so these win on the cascade
-       without needing !important everywhere. */
-    [data-testid="stSidebar"] {
-        background-color: #0B1220;
-        border-right: 1px solid #1E293B;
-    }
-    [data-testid="stSidebar"] * {
-        color: #CBD5E1;
-    }
-    [data-testid="stSidebar"] svg {
-        fill: #64748B;
-    }
-    [data-testid="stSidebar"] .stButton > button[kind="secondary"] {
-        background: transparent;
-        color: #CBD5E1;
-    }
-    [data-testid="stSidebar"] .stButton > button[kind="secondary"]:hover {
-        background: #16213A;
-        color: #F8FAFC;
-    }
-    [data-testid="stSidebar"] .stButton > button[kind="primary"] {
-        background: #16294D;
-        color: #7FB3FF;
-        font-weight: 600;
-        box-shadow: inset 3px 0 0 #3B82F6;
-    }
-    [data-testid="stSidebar"] .stTextInput input {
-        background-color: #131F35;
-        color: #F1F5F9;
-        border: 1px solid #263449;
-    }
-    [data-testid="stSidebar"] .stTextInput input::placeholder {
-        color: #5B6B84;
-    }
-    [data-testid="stSidebar"] .stTextInput input:focus {
-        border-color: #3B82F6;
-        box-shadow: 0 0 0 1px #3B82F6;
-    }
-    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
-        color: #8FA8C9 !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+from query_expand import expand_query
  
  
-# ---------------------------------------------------------------------------
-# Shared index: one instance for the whole running app (all users share the
-# same library), backed by whatever store.load_index_bytes() returns -- so
-# even a fresh instance rebuilds itself from Google Drive on cold start.
-# ---------------------------------------------------------------------------
-@st.cache_resource(show_spinner="Connecting to storage and loading the search index…")
-def get_index():
-    store = get_store()
-    return SearchIndex(store)
+class SearchIndex:
+    def __init__(self, store):
+        self.store = store
+        self.records = []  # list of {doc_id, filename, page_number, text}
+        self.vectorizer = None
+        self.matrix = None
+        # Streamlit runs each active browser session in its own thread
+        # within one shared process, and this SearchIndex instance (via
+        # st.cache_resource in app.py) is the SAME object across all of
+        # them. Without a lock, two uploads/deletes racing against each
+        # other -- or against a search -- could rebuild self.matrix from
+        # one snapshot of self.records while another thread has already
+        # swapped self.records for a different (shorter or longer) list,
+        # leaving the two permanently out of sync and causing an
+        # IndexError the next time someone searches. Serializing every
+        # mutation and search through this lock rules that out.
+        self._lock = threading.RLock()
+        self._load()
+        self._rebuild()
  
+    def _load(self):
+        raw = self.store.load_index_bytes()
+        if raw:
+            self.records = pickle.loads(raw)
  
-index = get_index()
-store = index.store
-# viewer_email is resolved once the sidebar (which asks "who are you?") has
-# rendered -- see below. Declared here only so functions defined above that
-# reference it as a module-level name (Python looks up globals at call
-# time, not at def time) don't error before that point.
-viewer_email = None
+    def _save(self):
+        self.store.save_index_bytes(pickle.dumps(self.records))
  
- 
-# Community Cloud's free tier caps this whole process at ~1GB RAM, and
-# every distinct PDF ever opened by any user was being kept in memory
-# forever (st.cache_data has no eviction by default) -- with enough
-# different manuals opened across a session or two, that alone was enough
-# to blow the limit. max_entries + ttl bound how many full PDFs stay
-# cached at once, evicting the least-recently-used ones instead of
-# growing without limit.
-@st.cache_data(show_spinner=False, max_entries=25, ttl=3600)
-def _download_bytes(_store, doc_id: str) -> bytes:
-    # doc_id is a filename (see drive_store.py's module docstring), not a
-    # raw Drive file id -- resolve_doc_id looks up whatever id that
-    # filename currently has *right now*, rather than trusting one cached
-    # from an earlier search index build, which turned out not to be
-    # reliably stable over time for at least one real Shared Drive.
-    return _store.download_bytes(_store.resolve_doc_id(doc_id))
- 
- 
-@st.cache_data(show_spinner=False, max_entries=50, ttl=3600)
-def _render_thumbnail(_store, file_id: str, page_number: int) -> bytes:
-    import pymupdf as fitz
- 
-    data = _download_bytes(_store, file_id)
-    doc = fitz.open(stream=data, filetype="pdf")
-    try:
-        page = doc[page_number - 1]
-        pix = page.get_pixmap(matrix=fitz.Matrix(0.6, 0.6))
-        return pix.tobytes("png")
-    finally:
-        doc.close()
- 
- 
-@st.cache_data(show_spinner=False, max_entries=50, ttl=3600)
-def _render_page_image(_store, file_id: str, page_number: int) -> bytes:
-    """A larger, actually-readable render of one page.
- 
-    The first version of "Preview this page" embedded the whole PDF as a
-    base64 data: URI inside an iframe (st.components.v1.html) so the
-    browser's own PDF viewer could jump to the right page. That worked
-    for small files, but for a large manual (tens of MB, the same file
-    Google Drive's own preview refused to open for being "too large") the
-    encoded page just rendered blank -- almost certainly hitting a size
-    ceiling either in the browser's data: URI handling or in Streamlit's
-    component message size. Rendering only the *one requested page* as an
-    image sidesteps that completely: its size depends only on that page's
-    content, never on how large or how many pages the source PDF has.
-    """
-    import pymupdf as fitz
- 
-    data = _download_bytes(_store, file_id)
-    doc = fitz.open(stream=data, filetype="pdf")
-    try:
-        page = doc[page_number - 1]
-        # Higher resolution than the thumbnail -- meant to actually be
-        # read, not just recognized at a glance.
-        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-        return pix.tobytes("png")
-    finally:
-        doc.close()
- 
- 
-@st.cache_data(show_spinner=False, max_entries=25, ttl=3600)
-def _page_count(_store, file_id: str) -> int:
-    import pymupdf as fitz
- 
-    data = _download_bytes(_store, file_id)
-    doc = fitz.open(stream=data, filetype="pdf")
-    try:
-        return doc.page_count
-    finally:
-        doc.close()
- 
- 
-def _highlight(snippet: str, terms: list) -> str:
-    escaped = html.escape(snippet)
-    terms = sorted({t for t in terms if len(t) > 1}, key=len, reverse=True)
-    for term in terms:
-        pattern = re.compile(r"(" + re.escape(html.escape(term)) + r")", re.IGNORECASE)
-        escaped = pattern.sub(r"**\1**", escaped)
-    return escaped
- 
- 
-def _category_badge_html(category: str) -> str:
-    meta = CATEGORY_META.get(category)
-    if not meta:
-        return (
-            "<span style='background:#F3F4F6;color:#4B5563;padding:2px 10px;"
-            "border-radius:999px;font-size:12px;font-weight:600;'>Uncategorized</span>"
+    def _rebuild(self):
+        if not self.records:
+            self.vectorizer = None
+            self.matrix = None
+            return
+        texts = [r["text"] for r in self.records]
+        self.vectorizer = TfidfVectorizer(
+            stop_words="english", ngram_range=(1, 2), max_features=50000
         )
-    return (
-        f"<span style='background:{meta['bg']};color:{meta['fg']};padding:2px 10px;"
-        f"border-radius:999px;font-size:12px;font-weight:600;'>{meta['icon']} {html.escape(category)}</span>"
-    )
+        self.matrix = self.vectorizer.fit_transform(texts)
  
- 
-def _scope_badge_html(scope_filename: str) -> str:
-    """A plain blue pill for the document a search was narrowed to (the
-    "Search within" dropdown), shown next to the category badge on a
-    Recent Searches / History row -- mirrors _category_badge_html's look
-    but in a neutral blue since it isn't tied to a category color."""
-    name = scope_filename.rsplit(".", 1)[0]  # drop the .pdf extension
-    if len(name) > 22:
-        name = name[:21] + "…"
-    return (
-        f"<span style='background:#EFF6FF;color:#2563EB;padding:2px 10px;"
-        f"border-radius:999px;font-size:12px;font-weight:600;'>{html.escape(name)}</span>"
-    )
- 
- 
-def _render_history_row(entry: dict, key_prefix: str, index: int):
-    """One card for a past search -- used by both the Search page's
-    "Recent Searches" panel and the full "My History" list, so the two
-    stay visually consistent.
- 
-    Every piece of HTML built here is assembled as a *single-line* string
-    (no multi-line triple-quoted blocks). That's not just style: when the
-    query has no category and wasn't scoped to a document, `badges` is an
-    empty string, and putting that on its own line inside a multi-line
-    f-string left a whitespace-only line in the middle of the HTML --
-    which Streamlit's markdown renderer (like most Markdown parsers)
-    treats as a paragraph break, splitting one HTML block into two and
-    printing everything after the break as literal escaped text instead
-    of rendering it. Keeping each chunk on one line sidesteps that
-    entirely, blank interpolated values or not.
-    """
-    badges = ""
-    category = entry.get("category")
-    if category:
-        badges += _category_badge_html(category)
-    scope_filename = entry.get("scope_filename")
-    if scope_filename:
-        badges += _scope_badge_html(scope_filename)
-    result_count = entry.get("result_count", 0)
-    doc_label = f"{result_count} document{'s' if result_count != 1 else ''}"
-    with st.container(border=True):
-        col_text, col_btn = st.columns([5, 1.3])
-        with col_text:
-            st.markdown(
-                f"<div style='display:flex;align-items:center;gap:8px;flex-wrap:wrap;'>"
-                f"<span style='font-size:15px;color:#2563EB;'>🔍</span>"
-                f"<span style='font-size:14px;font-weight:600;color:#1B2440;'>{html.escape(entry['query'])}</span>"
-                f"{badges}</div>"
-                f"<div style='font-size:12px;color:#6b7280;margin-top:4px;'>{doc_label} · {user_data.humanize_ago(entry['ts'])}</div>",
-                unsafe_allow_html=True,
-            )
-        with col_btn:
-            if st.button("Search again", key=f"{key_prefix}_{index}", use_container_width=True):
-                _goto_search(prefill_query=entry["query"])
- 
- 
-def _favorite_toggle(doc_id: str, filename: str, page_number: int, widget_id: str):
-    """Renders a star button that adds/removes this page from the current
-    viewer's Favorites. Without a name entered in the sidebar there's no
-    identity to save against, so this shows a hint instead of a button
-    that would silently do nothing."""
-    if not viewer_email:
-        st.caption("☆ Enter your name (sidebar) to save favorites")
-        return
-    is_fav = user_data.is_favorite(store, viewer_email, doc_id, page_number)
-    label = "★ Favorited" if is_fav else "☆ Add to favorites"
-    if st.button(label, key=f"fav_{widget_id}"):
-        user_data.toggle_favorite(store, viewer_email, doc_id, filename, page_number)
-        st.rerun()
- 
- 
-def _preview_download_controls(doc_id: str, filename: str, page_number: int, widget_id: str, result_ordinal: int = None):
-    """The lazy 'fetch only once asked' Preview / Download control pair,
-    shared by search results and the Favorites view. Two-step pattern:
-    a button first sets a session_state flag + reruns; only on that next
-    rerun does the actual Drive fetch happen and the real widget appear --
-    this is what keeps every displayed card from eagerly downloading its
-    full PDF on every search (the original cause of the memory crash).
- 
-    result_ordinal (search results only, not Favorites) renders an
-    invisible marker div right before the buttons, carrying this card's
-    1-based position in the results list as a data attribute. The
-    hands-free voice script (_VOICE_HTML) uses these markers to figure out
-    which card's buttons belong to "result 2" when someone says "preview
-    the second result" -- it can't just count matching buttons on the
-    page, because a card's "Preview this page" button disappears once
-    that card's preview is already open, which would silently shift every
-    later card's position. Finding the two markers that bracket a card and
-    only looking for buttons between them stays correct regardless of
-    which cards currently have their preview open."""
-    if result_ordinal is not None:
-        st.markdown(
-            f"<div class='voice-result-anchor' data-result-ordinal='{result_ordinal}' "
-            f"style='display:none;'></div>",
-            unsafe_allow_html=True,
-        )
-    btn1, btn2 = st.columns([1, 1])
-    pv_ready_key = f"pvready_{widget_id}"
-    dl_ready_key = f"dlready_{widget_id}"
-    with btn1:
-        # Google Drive's own web preview has an undocumented file-size
-        # ceiling and refuses to render bigger manuals -- a Drive
-        # limitation that can't be worked around. Rendering the page
-        # ourselves with PyMuPDF sidesteps it entirely.
-        if not st.session_state.get(pv_ready_key):
-            if st.button("👀 Preview this page", key=f"pvprep_{widget_id}"):
-                st.session_state[pv_ready_key] = True
-                st.rerun()
-    with btn2:
-        if st.session_state.get(dl_ready_key):
+    def add_document(self, doc_id: str, filename: str, chunks: list, category: str = "Uncategorized"):
+        if not chunks:
+            return 0
+        with self._lock:
+            previous_records = self.records
+            new_records = list(self.records)
+            for c in chunks:
+                new_records.append(
+                    {
+                        "doc_id": doc_id,
+                        "filename": filename,
+                        "page_number": c["page_number"],
+                        "text": c["text"],
+                        "category": category,
+                    }
+                )
+            self.records = new_records
             try:
-                pdf_bytes = _download_bytes(store, doc_id)
-            except Exception as e:
-                st.error(f"Couldn't fetch this file: {e}")
-            else:
-                st.download_button(
-                    "⬇️ Save PDF",
-                    data=pdf_bytes,
-                    file_name=filename,
-                    mime="application/pdf",
-                    key=f"dl_{widget_id}",
+                self._save()
+            except Exception:
+                # _save() talks to Google Drive over the network, and
+                # that call can fail partway (a transient SSL/timeout
+                # error, observed in production). If it does, self.records
+                # was already reassigned above but self.matrix never gets
+                # rebuilt to match it -- and that mismatch is exactly what
+                # produced repeated "IndexError: list index out of range"
+                # crashes on every search afterwards, for the rest of
+                # this process's life. Rolling records back to what
+                # self.matrix still agrees with (and re-raising so the
+                # caller sees the failure and can retry) keeps the index
+                # internally consistent even when the save didn't happen.
+                self.records = previous_records
+                raise
+            self._rebuild()
+        return len(chunks)
+ 
+    def remove_document(self, doc_id: str):
+        with self._lock:
+            previous_records = self.records
+            self.records = [r for r in self.records if r["doc_id"] != doc_id]
+            try:
+                self._save()
+            except Exception:
+                self.records = previous_records
+                raise
+            self._rebuild()
+ 
+    def replace_all(self, records: list):
+        """Wholesale replacement of every record -- used by the "Rebuild
+        search index from Drive" maintenance tool (see app.py). Useful for
+        picking up PDFs added directly in Drive outside the app's own
+        uploader, refreshing extracted text after a PDF's content changed,
+        and (one-time) migrating an index built before doc_id became the
+        filename (see drive_store.py's module docstring) rather than a raw
+        Drive file id -- that older scheme is what originally motivated
+        this tool: if the whole library folder was ever re-uploaded to a
+        new Drive location instead of actually moved, every file got a
+        brand new Drive file id, and the already-saved index kept pointing
+        at the old, now-nonexistent ones (a 404 "File not found" that had
+        nothing to do with permissions). Rescanning the folder and calling
+        this with freshly-extracted records fixed that without needing to
+        delete and re-upload every PDF by hand through the one-at-a-time
+        uploader."""
+        with self._lock:
+            previous_records = self.records
+            self.records = records
+            try:
+                self._save()
+            except Exception:
+                self.records = previous_records
+                raise
+            self._rebuild()
+ 
+    def list_documents(self):
+        with self._lock:
+            seen = {}
+            for r in self.records:
+                seen[r["doc_id"]] = {
+                    "filename": r["filename"],
+                    "category": r.get("category", "Uncategorized"),
+                }
+            return [
+                {"doc_id": k, "filename": v["filename"], "category": v["category"]}
+                for k, v in seen.items()
+            ]
+ 
+    def set_category(self, doc_id: str, category: str):
+        """Re-tags every chunk of an already-uploaded document. Used by the
+        library management UI to categorize documents that were uploaded
+        before categories existed, or to correct a mis-tagged one. Only
+        metadata changes, so there's no need to rebuild the TF-IDF matrix
+        afterwards -- just persist the updated records."""
+        with self._lock:
+            previous_records = self.records
+            new_records = [
+                {**r, "category": category} if r["doc_id"] == doc_id else r
+                for r in self.records
+            ]
+            self.records = new_records
+            try:
+                self._save()
+            except Exception:
+                self.records = previous_records
+                raise
+ 
+    def search(self, query: str, top_k: int = 8, doc_id: str = None, category: str = None):
+        with self._lock:
+            if self.vectorizer is None or self.matrix is None:
+                return []
+ 
+            expanded_query, highlight_terms = expand_query(query)
+            query_vec = self.vectorizer.transform([expanded_query])
+            sims = cosine_similarity(query_vec, self.matrix)[0]
+ 
+            if doc_id:
+                mask = np.array([r["doc_id"] == doc_id for r in self.records])
+                sims = np.where(mask, sims, -1.0)
+ 
+            if category and category != "All categories":
+                mask = np.array(
+                    [r.get("category", "Uncategorized") == category for r in self.records]
                 )
-        else:
-            if st.button("⬇️ Download PDF", key=f"dlprep_{widget_id}"):
-                st.session_state[dl_ready_key] = True
-                st.rerun()
+                sims = np.where(mask, sims, -1.0)
  
-    if st.session_state.get(pv_ready_key):
-        # Tracks which page is currently shown in *this* preview,
-        # separate from the page that actually matched the search, so
-        # Previous/Next can move around without losing track of it.
-        pv_page_key = f"pvpage_{widget_id}"
-        if pv_page_key not in st.session_state:
-            st.session_state[pv_page_key] = page_number
-        current_page = st.session_state[pv_page_key]
-        try:
-            total_pages = _page_count(store, doc_id)
-            page_img = _render_page_image(store, doc_id, current_page)
-        except Exception as e:
-            st.error(f"Couldn't load preview: {e}")
-        else:
-            # First/Last page exist mainly so hands-free voice mode has a
-            # single button to click for "first page" / "last page" --
-            # without them, jumping to the end of a long manual would mean
-            # simulating dozens of "next page" clicks in a row, which is
-            # slow and fragile (each click is a full Streamlit rerun).
-            nav0, nav1, nav2, nav3, nav4 = st.columns([1, 1, 2, 1, 1])
-            with nav0:
-                if st.button("⏮ First page", key=f"pvfirst_{widget_id}", disabled=current_page <= 1):
-                    st.session_state[pv_page_key] = 1
-                    st.rerun()
-            with nav1:
-                if st.button("◀ Previous page", key=f"pvprev_{widget_id}", disabled=current_page <= 1):
-                    st.session_state[pv_page_key] = current_page - 1
-                    st.rerun()
-            with nav2:
-                st.markdown(
-                    f"<div style='text-align:center;padding-top:6px;'>Page {current_page} / {total_pages}</div>",
-                    unsafe_allow_html=True,
-                )
-            with nav3:
-                if st.button("Next page ▶", key=f"pvnext_{widget_id}", disabled=current_page >= total_pages):
-                    st.session_state[pv_page_key] = current_page + 1
-                    st.rerun()
-            with nav4:
-                if st.button("Last page ⏭", key=f"pvlast_{widget_id}", disabled=current_page >= total_pages):
-                    st.session_state[pv_page_key] = total_pages
-                    st.rerun()
-            st.image(page_img, use_container_width=True)
- 
- 
-def _goto_search(prefill_query: str = None, prefill_category: str = None):
-    """Jumps to the Search view with the query box and/or category filter
-    pre-set -- used by Recent Searches, Favorites and category cards. Both
-    widgets use a dynamic key (search_widget_key / category_widget_key)
-    that's bumped here, forcing Streamlit to treat them as brand-new
-    widget instances on the next render so the new default actually takes
-    -- otherwise Streamlit would keep whatever the widget's own
-    session_state already held from before, ignoring the new `value=`."""
-    st.session_state.nav = "search"
-    if prefill_query is not None:
-        st.session_state["prefill_query"] = prefill_query
-        st.session_state.search_widget_key = st.session_state.get("search_widget_key", 0) + 1
-    if prefill_category is not None:
-        st.session_state["prefill_category"] = prefill_category
-        st.session_state.category_widget_key = st.session_state.get("category_widget_key", 0) + 1
-    st.rerun()
- 
- 
-# ---------------------------------------------------------------------------
-# Voice input: Streamlit has no built-in microphone widget, so this embeds
-# the same browser Web Speech API used in the original prototype. This needs
-# a real HTTPS origin to access the microphone at all -- which is exactly
-# what Streamlit Community Cloud provides automatically, no certificate
-# hassle required.
-#
-# Getting the recognized text from inside this iframe into the actual
-# search box took three tries:
-#   1. Navigate the top page directly (`window.parent.location.href = ...`).
-#      Confirmed in testing that Chrome blocks this outright -- the iframe
-#      components.v1.html() creates has no "allow-top-navigation" sandbox
-#      permission, so the mic's status line would show the recognized text,
-#      but the page never actually reloaded and the search box stayed empty.
-#   2. Post the text to a small listener injected into the top page (so
-#      *it* does the navigation instead, unsandboxed). Also dead on
-#      arrival: Streamlit's HTML renderer runs inline event-handler
-#      attributes like onerror="..." through React's prop validation,
-#      which rejects a string handler and throws before it ever runs.
-#   3. Report the text back as a real Streamlit *component value*, over
-#      the same protocol every custom component uses. This is the
-#      textbook-correct approach, but empirically broken in this
-#      Streamlit build -- even the well-established third-party
-#      streamlit-js-eval package hits the exact same "Received component
-#      message for unregistered ComponentInstance!" warning here, which
-#      means Streamlit's own frontend isn't registering *any* custom
-#      component's iframe right now, not just a homemade one.
-#
-# What actually works: this iframe's sandbox includes "allow-same-origin"
-# alongside "allow-scripts" -- and combining those two specific flags is
-# explicitly known to let a sandboxed srcdoc iframe access its parent
-# document directly (Chrome even logs a warning about it: "can escape its
-# sandboxing"). Top-*navigation* is still blocked regardless (that's a
-# separate flag), but plain same-origin DOM access is not, so instead of
-# navigating or messaging anything, the recognized text is written
-# straight into the real search <input> in the parent page (via the
-# native value setter + a synthetic "input" event, the standard trick for
-# updating a React-controlled input from outside React), then the input
-# is blurred -- which is what Streamlit's own text_input already commits
-# a new value on, exactly as if a person had typed it and clicked away.
-#
-# "Hands-free mode" (added for engineers wearing work gloves who can't
-# click a mic button between every search): continuous recognition
-# (recog.continuous = true) instead of the old one-shot "click, speak
-# once, done" flow. The key fact that makes this safe across searches is
-# something confirmed empirically with Playwright against a live local
-# run: st.components.v1.html() re-sends the exact same HTML string on
-# every Streamlit rerun, and because React sees an unchanged iframe
-# srcdoc, it does NOT tear the iframe down and reload it -- the running
-# `recog` object (and its listening state) survives every search, not
-# just the one that's currently on screen. (Verified by watching a
-# console.log fired at script top-level NOT re-fire across repeated
-# searches once the page had settled.) That's also why this can't simply
-# reset its own state every render the way the main Python script does --
-# it is only ever truly re-created on a full page reload.
-#
-# Wake word instead of a click to *start* listening, too: a browser will
-# never let JS request the microphone without a real click/tap somewhere
-# -- that one-time permission grant genuinely cannot be scripted around,
-# in any browser, for anyone. But Chrome remembers that grant per site
-# once it's been given, and checking *whether* it was already granted
-# (navigator.permissions.query) does not itself require a gesture. So:
-# first visit ever needs one tap (to produce the permission prompt);
-# every visit after that, this script checks the already-granted
-# permission on load and starts listening immediately on its own -- no
-# tap, every time, from then on.
-#
-# With that always-on listening, though, *every* sentence anyone says
-# near the laptop would otherwise get typed into the search box --
-# coworkers talking, a PA announcement, radio chatter. So once listening
-# has started it sits idle until an utterance starts with the wake word
-# ("guide"); anything without it is ignored outright (briefly shown in
-# the status line so the mic's obviously still alive, but never searched
-# or spoken). Saying "guide" *opens a session*, though, rather than
-# gating one single command: every utterance after that is treated as a
-# query with no need to repeat "guide", right up until "stop" is said or
-# a couple of minutes pass with nothing recognized. Earlier this instead
-# required the wake word before every command, which fought how people
-# actually talk -- continuous recognition splits speech into separate
-# utterances on any natural pause, so "Guide... [breath]... HT300 fade
-# stagger section" arrives as two utterances, and the second one (the
-# actual request) doesn't start with "guide" and would otherwise be
-# silently discarded as background noise. "stop"/"exit"/"quit"/"cancel"
-# work on their own, without the wake word, as an unconditional way to
-# end the session if anything seems to be misbehaving.
-#
-# Worth the person knowing, not just coded around: always-on listening
-# means audio is continuously sent to the browser's speech recognition
-# service while active (this is Chrome's own cloud recognizer, same as
-# any other site using the Web Speech API) -- fine for one engineer's own
-# use, but worth pausing (the button) rather than leaving on by default
-# in a shared space, for coworkers who haven't agreed to that.
-#
-# Auto-readback: the engineer's eyes are usually on the hardware, not the
-# screen, so after every search Python renders a small invisible marker
-# div (#voiceResultMarker, see below) carrying a fresh data-token (so this
-# script can tell "a new search just finished" from "nothing changed")
-# and a data-say sentence summarizing the results. This script polls for
-# that token change (there's no event for "the parent script re-ran" to
-# listen for) and reads data-say aloud with the ordinary browser
-# text-to-speech API (speechSynthesis) -- which, unlike the microphone,
-# needs no permission prompt and works fine from inside this iframe
-# directly, no parent-window access required.
-#
-# Action commands ("preview", "download", "next page", ...): once an
-# engineer can search hands-free, the next friction point is still having
-# to reach over and click to actually open/download/page through a result.
-# This reuses the exact same same-origin DOM-access trick as
-# fillParentSearchBox -- except instead of writing into the search <input>,
-# it finds and .click()s the real Streamlit <button> in the parent page
-# that a person would otherwise click by hand. A raw .click() on the
-# native element fires a real bubbling "click" event, which is all React's
-# synthetic event system needs to run the button's own onClick handler --
-# indistinguishable from a person actually clicking it.
-#
-# The hard part isn't clicking a button, it's finding the *right* one: a
-# search can return up to 8 results, each with its own "Preview this
-# page" / "Download PDF" / page-nav buttons, and every card's buttons have
-# the exact same label text as every other card's. Matching "the first
-# button on the page whose text says Preview" breaks the moment any
-# earlier card's preview is already open, because that card's own
-# "Preview this page" button disappears once open (see
-# _preview_download_controls) -- which silently shifts what "the next
-# matching button" even refers to. So Python renders an invisible marker
-# div before each card (class="voice-result-anchor", see
-# _preview_download_controls) carrying that card's 1-based position as a
-# data attribute, and buttonsForOrdinal() below finds the two markers that
-# bracket a given ordinal and only looks for buttons *between* them in
-# document order -- correct no matter which cards currently have their
-# preview open, since it's purely positional and never depends on what's
-# currently visible.
-#
-# Command words are intentionally a small fixed vocabulary ("preview",
-# "download", "next/previous/first/last page") rather than an attempt at
-# open-ended natural language, matching the same reasoning as STOP_WORDS
-# above: a short, documented, keyword-anchored set is predictable and hard
-# to mis-trigger by accident, where a looser parser would risk firing on
-# an ordinary search query that happens to contain one of those words
-# (e.g. a manual section literally titled "Download Mode"). An ordinal
-# ("result two" / "the second one" / a bare "2") picks which result a
-# command applies to; page-nav commands with no ordinal act on whichever
-# result was most recently previewed (lastPreviewedOrdinal), since by then
-# the person is almost always paging through the one they just opened, not
-# result #1 again. Downloading is still the same two-step
-# session_state-flag-then-rerun dance as a manual click (see
-# _preview_download_controls), so clicking "Download PDF" alone doesn't
-# yet produce a file -- the poll loop that already exists for
-# auto-readback also watches for a pending download's "Save PDF" button to
-# appear after that rerun and clicks it the moment it does, so the voice
-# command completes the whole flow without a second utterance.
-# ---------------------------------------------------------------------------
-_VOICE_HTML = """
-<style>
-@keyframes micPulse {
-  0%   { box-shadow: 0 0 0 0 rgba(220,38,38,0.45); }
-  70%  { box-shadow: 0 0 0 10px rgba(220,38,38,0); }
-  100% { box-shadow: 0 0 0 0 rgba(220,38,38,0); }
-}
-#micBtn.listening {
-  background: #DC2626 !important;
-  animation: micPulse 1.4s infinite;
-}
-</style>
-<div style="font-family:'Inter',-apple-system,Segoe UI,Roboto,sans-serif;">
-  <button id="micBtn" style="padding:9px 18px;border-radius:999px;border:none;
-    background:#2563EB;color:white;font-size:14px;font-weight:500;cursor:pointer;
-    box-shadow:0 1px 3px rgba(37,99,235,0.4);">
-    🎤 Enable microphone (first time only)
-  </button>
-  <div id="voiceStatus" style="margin-top:8px;font-size:13px;color:#6b7280;"></div>
-  <div style="margin-top:4px;font-size:11px;color:#9ca3af;">
-    Say "guide" to start, then: your search &middot; "preview" / "preview result 2" &middot;
-    "download" &middot; "next page" / "previous page" &middot; "first page" / "last page" &middot; "stop"
-  </div>
-</div>
-<script>
-const btn = document.getElementById('micBtn');
-const statusEl = document.getElementById('voiceStatus');
-const WAKE_WORD = 'guide';
-const LABEL_ENABLE = '🎤 Enable microphone (first time only)';
-const LABEL_LISTENING = '⏸ Pause listening';
-const LABEL_PAUSED = '▶ Resume (say "' + WAKE_WORD + '" to activate)';
- 
-// Finds the real search <input> in the parent page (see the big comment
-// above) and fills it in the same way a person typing would, then blurs
-// it so Streamlit commits the new value. Falls back to just leaving the
-// text in this iframe's own status line (for manual copy/paste) if the
-// parent DOM ever doesn't match what's expected here.
-function fillParentSearchBox(text) {
-  try {
-    const doc = window.parent.document;
-    const input = doc.querySelector('input[aria-label="Search"]')
-      || doc.querySelector('input[placeholder*="overcurrent fault"]');
-    if (!input) {
-      statusEl.innerText = 'Could not find the search box automatically -- copy this: "' + text + '"';
-      return false;
-    }
-    const nativeSetter = Object.getOwnPropertyDescriptor(
-      window.parent.HTMLInputElement.prototype, 'value'
-    ).set;
-    nativeSetter.call(input, text);
-    input.dispatchEvent(new window.parent.Event('input', { bubbles: true }));
-    input.focus();
-    input.blur();
-    return true;
-  } catch (err) {
-    statusEl.innerText = 'Could not fill the search box automatically -- copy this: "' + text + '"';
-    return false;
-  }
-}
- 
-// Picks which result a voice command applies to. Looks for a word form
-// ("second", "two") or a bare digit anywhere in the utterance; returns
-// null if none is found, so the caller can fall back to a sensible
-// default instead of guessing.
-const ORDINAL_WORDS = {
-  first: 1, one: 1, '1st': 1,
-  second: 2, two: 2, '2nd': 2,
-  third: 3, three: 3, '3rd': 3,
-  fourth: 4, four: 4, '4th': 4,
-  fifth: 5, five: 5, '5th': 5,
-  sixth: 6, six: 6, '6th': 6,
-  seventh: 7, seven: 7, '7th': 7,
-  eighth: 8, eight: 8, '8th': 8,
-  top: 1,
-};
-function extractOrdinal(text) {
-  const words = text.split(/\\s+/);
-  for (const w of words) {
-    const clean = w.replace(/[^a-z0-9]/g, '');
-    if (clean in ORDINAL_WORDS) return ORDINAL_WORDS[clean];
-    if (/^\\d+$/.test(clean)) return parseInt(clean, 10);
-  }
-  return null;
-}
- 
-// Remembers which result ordinal a page-nav command ("next page") should
-// act on when the utterance didn't name one -- almost always whichever
-// result the person most recently opened a preview for.
-let lastPreviewedOrdinal = 1;
-// Set right after clicking a result's "Download PDF" button; the poll
-// loop below watches for that same result's "Save PDF" button to appear
-// (it only exists after Streamlit's next rerun) and clicks it once, so a
-// single voice command finishes the whole two-step download.
-// pendingDownloadDeadline bounds how long it keeps watching, so a failed
-// fetch (see _preview_download_controls' error branch, which never
-// produces a "Save PDF" button at all) doesn't leave this checking forever.
-let pendingDownloadOrdinal = null;
-let pendingDownloadDeadline = 0;
- 
-// Finds every .voice-result-anchor marker Python renders just before each
-// search result's buttons (see _preview_download_controls), sorted into
-// document order. These exist purely so action commands can tell which
-// card "result 2" refers to without depending on which of that card's
-// buttons currently happen to be visible -- see the big comment above.
-function getResultAnchors() {
-  try {
-    const doc = window.parent.document;
-    const anchors = Array.from(doc.querySelectorAll('.voice-result-anchor'))
-      .map((el) => ({ el, ordinal: parseInt(el.getAttribute('data-result-ordinal'), 10) }))
-      .filter((a) => !isNaN(a.ordinal));
-    anchors.sort((a, b) => {
-      const pos = a.el.compareDocumentPosition(b.el);
-      if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-      if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
-      return 0;
-    });
-    return anchors;
-  } catch (err) {
-    return [];
-  }
-}
- 
-// Every button in the parent page, between the anchor for `ordinal` and
-// the anchor for the next ordinal (or the end of the document, for the
-// last result), whose visible text matches labelRegex. This is what lets
-// "preview result 2" find result 2's button even if result 1's preview is
-// already open and its own "Preview this page" button has disappeared.
-function buttonsForOrdinal(ordinal, labelRegex) {
-  try {
-    const doc = window.parent.document;
-    const anchors = getResultAnchors();
-    const anchor = anchors.find((a) => a.ordinal === ordinal);
-    if (!anchor) return [];
-    const nextAnchor = anchors.find((a) => a.ordinal === ordinal + 1);
-    const isAfterAnchor = (el) => !!(anchor.el.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
-    const isBeforeNext = (el) => !nextAnchor || !!(el.compareDocumentPosition(nextAnchor.el) & Node.DOCUMENT_POSITION_FOLLOWING);
-    return Array.from(doc.querySelectorAll('button')).filter((b) => {
-      if (!isAfterAnchor(b) || !isBeforeNext(b)) return false;
-      return labelRegex.test(b.innerText || b.textContent || '');
-    });
-  } catch (err) {
-    return [];
-  }
-}
- 
-function previewResult(ordinal) {
-  const openBtn = buttonsForOrdinal(ordinal, /preview this page/i);
-  if (openBtn.length) {
-    openBtn[0].click();
-    lastPreviewedOrdinal = ordinal;
-    statusEl.innerText = '👀 Opening preview for result ' + ordinal + '...';
-    return;
-  }
-  // No "Preview this page" button left to click -- either it's already
-  // open (nav buttons present instead) or there's no such result at all.
-  const alreadyOpen = buttonsForOrdinal(ordinal, /next page|previous page/i);
-  if (alreadyOpen.length) {
-    lastPreviewedOrdinal = ordinal;
-    statusEl.innerText = 'Result ' + ordinal + ' is already open.';
-    return;
-  }
-  statusEl.innerText = '⚠️ No result #' + ordinal + '.';
-  speak('I could not find result ' + ordinal + '.');
-}
- 
-function downloadResult(ordinal) {
-  // Not anchored/exact -- the real label has a leading icon ("⬇️ Download
-  // PDF"), same lesson as pageNav's regexes above. Excludes "save pdf" so
-  // this doesn't also match the *other* button once it appears.
-  const prepBtn = buttonsForOrdinal(ordinal, /download pdf/i);
-  if (prepBtn.length) {
-    prepBtn[0].click();
-    pendingDownloadOrdinal = ordinal;
-    pendingDownloadDeadline = Date.now() + 8000;
-    statusEl.innerText = '⬇️ Preparing download for result ' + ordinal + '...';
-    return;
-  }
-  const saveBtn = buttonsForOrdinal(ordinal, /save pdf/i);
-  if (saveBtn.length) {
-    saveBtn[0].click();
-    statusEl.innerText = '✅ Downloading result ' + ordinal + '.';
-    return;
-  }
-  statusEl.innerText = '⚠️ No result #' + ordinal + '.';
-  speak('I could not find result ' + ordinal + '.');
-}
- 
-function pageNav(ordinal, label, regex) {
-  const btn = buttonsForOrdinal(ordinal, regex);
-  if (btn.length && !btn[0].disabled) {
-    btn[0].click();
-    lastPreviewedOrdinal = ordinal;
-    statusEl.innerText = label + ' (result ' + ordinal + ').';
-    return;
-  }
-  statusEl.innerText = '⚠️ No open preview to ' + label.toLowerCase() + ' for result ' + ordinal + ' -- say "preview" first.';
-}
- 
-// Tries each action command in turn; falls through to treating the whole
-// utterance as a search query if none match. Kept to a small fixed set of
-// keywords (not open-ended parsing) so it stays predictable -- see the big
-// comment above for why.
-function routeCommand(text) {
-  const normalized = text.trim().toLowerCase().replace(/[.!?]+$/, '');
-  if (!normalized) return;
-  const short = normalized.split(/\\s+/).length <= 6;
-  const explicitOrdinal = extractOrdinal(normalized);
-  const ordinal = explicitOrdinal || lastPreviewedOrdinal;
- 
-  // Note: these match *anywhere* in the button's visible text, not
-  // anchored to the start -- the real labels have a leading icon
-  // ("⏮ First page", "◀ Previous page"), which an anchored /^.../ missed
-  // entirely during testing (Next/Last happened to still pass, since
-  // their icon is trailing, which is what made this easy to miss).
-  if (short && /\\blast\\s+page\\b/.test(normalized)) { pageNav(ordinal, 'Last page', /last page/i); return; }
-  if (short && /\\bfirst\\s+page\\b/.test(normalized)) { pageNav(ordinal, 'First page', /first page/i); return; }
-  if (short && (/\\bnext\\s+page\\b/.test(normalized) || normalized === 'next')) { pageNav(ordinal, 'Next page', /next page/i); return; }
-  if (short && (/\\bprevious\\s+page\\b/.test(normalized) || /\\bgo\\s+back\\b/.test(normalized) || normalized === 'back' || normalized === 'previous')) { pageNav(ordinal, 'Previous page', /previous page/i); return; }
-  if (short && /\\bdownload\\b/.test(normalized)) { downloadResult(explicitOrdinal || 1); return; }
-  if (short && (/\\bpreview\\b/.test(normalized) || (/\\bresult\\b/.test(normalized) && /^(open|show)\\b/.test(normalized)))) { previewResult(explicitOrdinal || 1); return; }
- 
-  if (fillParentSearchBox(text)) {
-    statusEl.innerText = '✅ Searching for "' + text + '"';
-  }
-}
- 
-// Plain browser text-to-speech -- no permission prompt needed, unlike the
-// mic. .cancel() first so a fast-talking engineer's new sentence doesn't
-// queue up behind (and get read out after) an older one.
-function speak(text) {
-  try {
-    if (!window.speechSynthesis) return;
-    const utter = new SpeechSynthesisUtterance(text);
-    utter.lang = 'en-US';
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utter);
-  } catch (err) { /* TTS unsupported here -- silently skip, mic still works */ }
-}
- 
-const STOP_WORDS = ['stop', 'exit', 'quit', 'cancel', 'stop listening', 'end'];
- 
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-if (!SR) {
-  statusEl.innerText = 'Voice input needs Chrome/Edge (Web Speech API not available here).';
-  btn.disabled = true;
-} else {
-  const recog = new SR();
-  recog.lang = 'en-US';
-  recog.continuous = true;
-  recog.interimResults = true;
-  recog.maxAlternatives = 1;
- 
-  let wantListening = false;   // true unless the person paused it (click or "stop")
-  let listening = false;       // whether recog.start() is currently active
-  let resultCursor = 0;        // index into e.results already handled this session
-  let lastResultToken = null;  // last #voiceResultMarker token we've already read aloud
- 
-  function startRecognition() {
-    wantListening = true;
-    if (listening) return;
-    resultCursor = 0;
-    try {
-      recog.start();
-    } catch (err) {
-      // "already started" races can happen right after a restart -- harmless.
-    }
-  }
- 
-  function pauseRecognition(spokenMessage) {
-    wantListening = false;
-    statusEl.innerText = spokenMessage;
-    speak(spokenMessage);
-    try { recog.stop(); } catch (err) {}
-  }
- 
-  // The wake word has to be the *first* word of the utterance, not just
-  // anywhere in the sentence -- tested against real sentences like
-  // "please guide me through this" during development, which would
-  // otherwise misfire as a search for "me" if "guide" were matched
-  // anywhere. Returns null (no wake word here at all), '' (wake word
-  // said alone), or the text after it.
-  function extractCommand(text) {
-    const t = text.trim();
-    const lower = t.toLowerCase();
-    if (!lower.startsWith(WAKE_WORD)) return null;
-    // Require a whole-word match -- "guidebook" shouldn't count as the
-    // wake word just because it starts with the same letters.
-    const nextChar = t.charAt(WAKE_WORD.length);
-    if (nextChar && /[a-zA-Z]/.test(nextChar)) return null;
-    return t.slice(WAKE_WORD.length).replace(/^[\\s,.:;!-]+/, '').trim();
-  }
- 
-  // Saying "guide" doesn't gate a single command -- it opens a session
-  // where *every* following utterance is a query, exactly like clicking
-  // "start" used to in the click-based hands-free mode, right up until
-  // "stop" is said. This went through one earlier design (wake word
-  // required before every single command) that turned out to fight how
-  // people actually talk: continuous recognition splits speech into
-  // separate utterances on any natural pause, so "Guide... [breath]...
-  // HT300 fade stagger section" arrives as two utterances, and requiring
-  // the wake word on each one meant the second utterance (the actual
-  // request) kept getting silently discarded as background noise. A
-  // session auto-closes after a couple of minutes of nothing recognized,
-  // so it doesn't sit "open" (treating ambient chatter as searches)
-  // indefinitely if the person walks away without saying "stop".
-  let sessionActive = false;
-  let sessionTimer = null;
-  const SESSION_IDLE_MS = 120000;
- 
-  function startSession() {
-    sessionActive = true;
-    armSessionTimeout();
-  }
- 
-  function endSession() {
-    sessionActive = false;
-    clearTimeout(sessionTimer);
-  }
- 
-  function armSessionTimeout() {
-    clearTimeout(sessionTimer);
-    sessionTimer = setTimeout(() => {
-      sessionActive = false;
-      statusEl.innerText = 'Session timed out -- say "' + WAKE_WORD + '" to start again.';
-    }, SESSION_IDLE_MS);
-  }
- 
-  function handleUtterance(text) {
-    const normalized = text.trim().toLowerCase().replace(/[.!?]+$/, '');
-    if (STOP_WORDS.includes(normalized)) {
-      endSession();
-      pauseRecognition('Paused.');
-      return;
-    }
-    if (sessionActive) {
-      // Already in a session -- no need to repeat the wake word, this
-      // utterance IS the query (or an action command -- see routeCommand).
-      armSessionTimeout();
-      routeCommand(text);
-      return;
-    }
-    const command = extractCommand(text);
-    if (command === null) {
-      // No wake word in this utterance at all -- background chatter,
-      // most likely. Show it briefly so it's clear the mic is alive and
-      // actually hearing things, but take no action.
-      statusEl.innerText = '👂 (' + text + ')';
-      return;
-    }
-    // Wake word heard -- open the session either way. If the query came
-    // in the same breath ("guide BQ300"), run it immediately instead of
-    // waiting for a separate utterance that may never come.
-    startSession();
-    if (command) {
-      routeCommand(command);
-    } else {
-      statusEl.innerText = 'Listening -- go ahead (no need to say "' + WAKE_WORD + '" again).';
-      speak('Yes, go ahead.');
-    }
-  }
- 
-  recog.onstart = () => {
-    listening = true;
-    btn.classList.add('listening');
-    btn.innerText = LABEL_LISTENING;
-  };
-  recog.onerror = (e) => {
-    const messages = {
-      'no-speech': null,  // expected during normal pauses in continuous mode -- not a real error
-      'not-allowed': 'Microphone access blocked. Allow it in the browser site settings.',
-      'service-not-allowed': 'Microphone access blocked. Allow it in the browser site settings.',
-      'audio-capture': 'No microphone found.',
-      'network': 'Network error during speech recognition.'
-    };
-    const msg = messages[e.error];
-    if (msg) {
-      statusEl.innerText = msg;
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        wantListening = false;  // these never recover by themselves -- stop retrying
-      }
-    }
-  };
-  recog.onend = () => {
-    listening = false;
-    btn.classList.remove('listening');
-    if (wantListening) {
-      // Continuous mode can still end on its own (long silence, a brief
-      // network hiccup) -- restart automatically so the person doesn't
-      // have to touch anything to keep going.
-      setTimeout(startRecognition, 300);
-    } else {
-      btn.innerText = LABEL_PAUSED;
-    }
-  };
-  recog.onresult = (e) => {
-    let interim = '';
-    for (let i = resultCursor; i < e.results.length; i++) {
-      const r = e.results[i];
-      if (r.isFinal) {
-        resultCursor = i + 1;
-        const text = r[0].transcript.trim();
-        if (text) handleUtterance(text);
-      } else {
-        interim += r[0].transcript;
-      }
-    }
-    if (interim) statusEl.innerText = '🎙️ ' + interim;
-  };
- 
-  btn.onclick = () => {
-    if (listening || wantListening) {
-      pauseRecognition('Paused.');
-    } else {
-      statusEl.innerText = 'Starting…';
-      startRecognition();
-    }
-  };
- 
-  // First-ever visit: the mic permission prompt can only ever appear
-  // after a real click, so the button above is the entry point and stays
-  // labelled as a one-time "enable" action until that first grant. Every
-  // visit after that, permissions.query can read the already-granted
-  // state without needing a gesture, so recognition starts immediately
-  // on its own, no tap required. (Not every browser supports querying
-  // 'microphone' this way -- if it throws or comes back anything but
-  // 'granted', this just falls back to waiting for that first tap.)
-  try {
-    navigator.permissions.query({ name: 'microphone' }).then((status) => {
-      if (status.state === 'granted') {
-        statusEl.innerText = 'Say "' + WAKE_WORD + '" to activate';
-        startRecognition();
-      }
-    }).catch(() => {});
-  } catch (err) { /* Permissions API unsupported -- first tap still works fine */ }
- 
-  // Auto-readback: poll the parent page for a fresh search result, and
-  // read the summary aloud -- see the big comment above for why this has
-  // to be a poll rather than an event.
-  setInterval(() => {
-    try {
-      const marker = window.parent.document.getElementById('voiceResultMarker');
-      if (!marker) return;
-      const token = marker.getAttribute('data-token');
-      if (token && token !== lastResultToken) {
-        lastResultToken = token;
-        const say = marker.getAttribute('data-say');
-        if (say) speak(say);
-      }
-    } catch (err) { /* parent DOM not ready yet on first load -- ignore */ }
- 
-    // Completes a voice-triggered download: "Download PDF" only arms the
-    // fetch (see _preview_download_controls' two-step pattern) and the
-    // real "Save PDF" button doesn't exist until Streamlit's next rerun
-    // finishes, which this script can't wait for synchronously -- so it
-    // just keeps checking here until that button shows up, then clicks it
-    // once on its own.
-    if (pendingDownloadOrdinal !== null) {
-      const saveBtn = buttonsForOrdinal(pendingDownloadOrdinal, /save pdf/i);
-      if (saveBtn.length) {
-        const ordinal = pendingDownloadOrdinal;
-        pendingDownloadOrdinal = null;
-        saveBtn[0].click();
-        statusEl.innerText = '✅ Downloading result ' + ordinal + '.';
-      } else if (Date.now() > pendingDownloadDeadline) {
-        statusEl.innerText = '⚠️ Download for result ' + pendingDownloadOrdinal + ' timed out -- try again.';
-        pendingDownloadOrdinal = null;
-      }
-    }
-  }, 600);
-}
-</script>
-"""
- 
-# ---------------------------------------------------------------------------
-# Sidebar navigation
-# ---------------------------------------------------------------------------
-if "nav" not in st.session_state:
-    st.session_state.nav = "search"
- 
-# The "Your name" identity (see below) also lives in the page's own URL as
-# ?viewer_name=..., so simply reloading this tab or reopening a bookmarked
-# link that already has it restores it with zero clicks -- st.query_params
-# is ordinary Streamlit state read/written directly by the main script, so
-# unlike a trick routed through an embedded component's iframe, there's no
-# browser sandbox permission involved here at all.
-if "viewer_name" not in st.session_state:
-    st.session_state.viewer_name = st.query_params.get("viewer_name", "")
- 
-with st.sidebar:
-    st.markdown(
-        """
-        <div style="display:flex;align-items:center;gap:10px;margin:4px 0 18px 0;">
-          <div style="width:36px;height:36px;border-radius:10px;background:rgba(59,130,246,0.15);
-            border:1px solid rgba(59,130,246,0.35);
-            display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">
-            🔧
-          </div>
-          <div style="font-size:16px;font-weight:700;color:#F1F5F9;line-height:1.2;">
-            Technical Manual<br/>Search
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    nav_items = [
-        ("search", "🔍  Search"),
-        ("history", "🕐  My History"),
-        ("favorites", "☆  Favorites"),
-        ("about", "ℹ️  About"),
-    ]
-    for key, label in nav_items:
-        active = st.session_state.nav == key
-        if st.button(label, key=f"nav_{key}", type="primary" if active else "secondary", use_container_width=True):
-            st.session_state.nav = key
-            st.rerun()
- 
-    # Simple, no-setup identity for My History / Favorites: Streamlit
-    # Community Cloud's viewer-email allowlist (which restricts who can
-    # open this app) stopped exposing the visitor's verified email to the
-    # app itself as of Streamlit 1.42 -- st.user now requires a full
-    # Google OAuth/OIDC login flow wired up separately, which is more
-    # setup than this needs right now. Instead, each person just tells the
-    # app their own name once, and that's what their History/Favorites are
-    # saved under. It's not verified (nothing stops someone from typing a
-    # colleague's name), but for a small trusted internal team that's a
-    # reasonable trade for zero extra setup.
-    st.markdown("<div style='margin-top:14px;font-size:11px;font-weight:600;color:#64A0E8;letter-spacing:0.05em;text-transform:uppercase;'>Your name</div>", unsafe_allow_html=True)
-    name_input = st.text_input(
-        "Your name",
-        value=st.session_state.get("viewer_name", ""),
-        placeholder="e.g. Jiajun Hou",
-        label_visibility="collapsed",
-        key="viewer_name_input",
-        help="Used to keep your own search history and favorites separate from your colleagues'. Once set, it's part of this page's link -- bookmark it (or just keep reusing this tab) to skip retyping it next time.",
-    )
-    st.session_state.viewer_name = name_input.strip()
-    if st.session_state.viewer_name:
-        st.query_params["viewer_name"] = st.session_state.viewer_name
-        st.caption(f"🔖 Bookmark this page to return as **{html.escape(st.session_state.viewer_name)}**.")
-    elif "viewer_name" in st.query_params:
-        del st.query_params["viewer_name"]
- 
-viewer_email = st.session_state.get("viewer_name") or None
- 
-docs = index.list_documents()
- 
-# ---------------------------------------------------------------------------
-# Top header (branded bar within the main content area)
-# ---------------------------------------------------------------------------
-storage_ok = store.mode == "drive"
-if viewer_email:
-    initials = "".join(p[0] for p in re.split(r"[\s.\-_@]+", viewer_email) if p)[:2].upper()
-    user_badge = f"<div title='{html.escape(viewer_email)}' style='width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;'>{initials}</div>"
-else:
-    user_badge = "<div style='font-size:13px;opacity:0.8;'>Guest</div>"
- 
-header_col1, header_col2 = st.columns([5, 1])
-with header_col1:
-    st.markdown(
-        f"""
-        <div style="background:#0F1E3D;border-radius:14px;padding:18px 24px;
-          display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
-          <div style="display:flex;align-items:center;gap:14px;">
-            <div style="width:42px;height:42px;border-radius:10px;background:rgba(255,255,255,0.1);
-              display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;">
-              🔧
-            </div>
-            <div>
-              <div style="font-size:20px;font-weight:700;color:#FFFFFF;line-height:1.2;">
-                Technical Manual Search
-              </div>
-              <div style="font-size:13px;color:#9CA9C7;">
-                Find the right document. Faster.
-              </div>
-            </div>
-          </div>
-          <div style="display:flex;align-items:center;gap:16px;">
-            <div style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;
-              border-radius:999px;font-size:11px;font-weight:600;
-              background:{'rgba(16,185,129,0.15)' if storage_ok else 'rgba(249,115,22,0.15)'};
-              color:{'#34D399' if storage_ok else '#FB923C'};">
-              <span style="width:6px;height:6px;border-radius:50%;
-                background:{'#10B981' if storage_ok else '#F97316'};"></span>
-              {'Google Drive' if storage_ok else 'local (dev mode)'}
-            </div>
-            {user_badge}
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-with header_col2:
-    st.write("")
-    if st.button("❓ Help", key="help_btn", use_container_width=True):
-        st.session_state.nav = "about"
-        st.rerun()
- 
-# ---------------------------------------------------------------------------
-# Route to the selected view
-# ---------------------------------------------------------------------------
-view = st.session_state.nav
- 
-if view == "search":
-    st.markdown(
-        """
-        <div style="background:#EFF6FF;border-radius:16px;padding:28px 32px;margin-bottom:18px;">
-          <div style="font-size:26px;font-weight:700;color:#1B2440;line-height:1.25;">
-            Search the shared manual library
-          </div>
-          <div style="font-size:14px;color:#475569;margin-top:4px;">
-            Search across every service manual in the library, by keyword or by voice.
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
- 
-    if "search_widget_key" not in st.session_state:
-        st.session_state.search_widget_key = 0
-    if "category_widget_key" not in st.session_state:
-        st.session_state.category_widget_key = 0
- 
-    if "prefill_query" in st.session_state:
-        initial_query = st.session_state.pop("prefill_query")
-    else:
-        initial_query = ""
- 
-    category_options = ["All categories"] + CATEGORY_NAMES
-    if "prefill_category" in st.session_state:
-        initial_category = st.session_state.pop("prefill_category")
-    else:
-        initial_category = "All categories"
-    default_cat_index = (
-        category_options.index(initial_category) if initial_category in category_options else 0
-    )
- 
-    # Category comes before Document in both the layout and the code: which
-    # documents even make sense to narrow to depends on the chosen category,
-    # so the category has to be picked first -- picking "Service Manual"
-    # then only shows service manuals in "Search within", instead of the
-    # full document list with mostly-irrelevant entries in it.
-    col_q, col_cat, col_doc, col_btn = st.columns([3, 1, 1, 1])
-    with col_q:
-        query = st.text_input(
-            "Search",
-            value=initial_query,
-            placeholder="e.g. overcurrent fault on PCB, HMI calibration, inverter parameter…",
-            label_visibility="collapsed",
-            key=f"search_box_{st.session_state.search_widget_key}",
-        )
-    with col_cat:
-        category_label = st.selectbox(
-            "Category",
-            category_options,
-            index=default_cat_index,
-            label_visibility="collapsed",
-            key=f"category_select_{st.session_state.category_widget_key}",
-        )
- 
-    if category_label != "All categories":
-        docs_in_scope = [d for d in docs if d.get("category", "Uncategorized") == category_label]
-    else:
-        docs_in_scope = docs
-    doc_options = {"All documents": None}
-    for d in docs_in_scope:
-        doc_options[d["filename"]] = d["doc_id"]
- 
-    with col_doc:
-        scope_label = st.selectbox(
-            "Search within", list(doc_options.keys()), label_visibility="collapsed"
-        )
-    with col_btn:
-        st.button("🔍 Search", use_container_width=True)
- 
-    # See the big comment above _VOICE_HTML for why this fills the search
-    # box directly via same-origin DOM access instead of going through
-    # Streamlit's own (currently broken, in this build) component-value
-    # protocol -- the recognized text lands straight in the real <input>
-    # above, so nothing further needs to happen here at all.
-    st.components.v1.html(_VOICE_HTML, height=70)
- 
-    # -----------------------------------------------------------------
-    # Popular search categories
-    # -----------------------------------------------------------------
-    st.markdown("<div style='font-size:16px;font-weight:700;color:#1B2440;margin:20px 0 10px 0;'>🔥 Popular search categories</div>", unsafe_allow_html=True)
-    category_counts = Counter(d.get("category", "Uncategorized") for d in docs)
-    cat_rows = [CATEGORY_NAMES[i:i + 3] for i in range(0, len(CATEGORY_NAMES), 3)]
-    for row in cat_rows:
-        cols = st.columns(3, gap="medium")
-        for col, cat_name in zip(cols, row):
-            meta = CATEGORY_META[cat_name]
-            count = category_counts.get(cat_name, 0)
-            with col:
-                # st.container(key=...) gets a stable "st-key-<key>" CSS
-                # class (see the CSS block near the top of this file) --
-                # that's what lets the whole colored card act as one
-                # clickable unit: the real st.button underneath is
-                # stretched to cover it and made invisible, while this
-                # markdown supplies the actual look.
-                with st.container(key=f"catcard_{cat_name}"):
-                    st.markdown(
-                        f"""
-                        <div style="background:#FFFFFF;border:1px solid #E9EDF3;border-radius:14px;
-                          padding:16px 18px;box-shadow:0 1px 2px rgba(16,24,40,0.04);">
-                          <div style="display:flex;align-items:center;gap:12px;">
-                            <div style="width:38px;height:38px;border-radius:10px;background:{meta['fg']};
-                              display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">
-                              {meta['icon']}
-                            </div>
-                            <div style="flex:1;min-width:0;">
-                              <div style="font-size:14px;font-weight:700;color:{meta['fg']};">{html.escape(cat_name)}</div>
-                              <div style="font-size:12px;color:#6B7280;">{meta['sub']} · {count} doc{'s' if count != 1 else ''}</div>
-                            </div>
-                            <div style="font-size:16px;color:#9CA3AF;">→</div>
-                          </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                    if st.button("Browse", key=f"catbtn_{cat_name}", use_container_width=True):
-                        _goto_search(prefill_category=cat_name)
- 
-    st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
- 
-    # -----------------------------------------------------------------
-    # Results / Recent Searches + Tips
-    # -----------------------------------------------------------------
-    if query.strip():
-        try:
-            hits = index.search(
-                query, top_k=8, doc_id=doc_options[scope_label], category=category_label
-            )
-        except Exception as e:
-            st.error(
-                f"Search failed: {e}. If this keeps happening, use the app's "
-                "'Reboot app' option (or ask whoever manages it to) to clear "
-                "the search index and rebuild it fresh."
-            )
+            # A single page can be split into several overlapping chunks
+            # (see pdf_processor.chunk_pages), so the raw ranking can
+            # contain more than one hit for the same (doc_id, page_number)
+            # -- keep only the highest-scoring chunk per page, both
+            # because showing the same page twice isn't useful and
+            # because the UI keys results by (doc_id, page_number).
+            ranked = np.argsort(sims)[::-1]
+            seen_pages = set()
             hits = []
- 
-        # Distinct documents, not raw page hits -- "4 documents" reads more
-        # usefully than "7 result(s)" when several hits are different pages
-        # of the same manual. Used both for Recent Searches logging below
-        # and for the hands-free voice readback (see _VOICE_HTML).
-        doc_count = len({h["doc_id"] for h in hits})
- 
-        if viewer_email and query.strip() != st.session_state.get("last_logged_query"):
-            st.session_state.last_logged_query = query.strip()
-            user_data.add_history_entry(
-                store,
-                viewer_email,
-                query.strip(),
-                doc_count,
-                category=category_label if category_label != "All categories" else None,
-                scope_filename=scope_label if scope_label != "All documents" else None,
-            )
- 
-        # Invisible marker the hands-free voice script polls for (it can't
-        # listen for "the Python script re-ran", so it watches this
-        # instead): a token that changes on every search, plus a
-        # ready-to-speak summary of what was found. See the big comment
-        # above _VOICE_HTML for why this has to be poll-based.
-        st.session_state.voice_result_seq = st.session_state.get("voice_result_seq", 0) + 1
-        if hits:
-            top = hits[0]
-            doc_word = "document" if doc_count == 1 else "documents"
-            page_word = "page" if len(hits) == 1 else "pages"
-            voice_say = (
-                f"Found {len(hits)} {page_word} across {doc_count} {doc_word}. "
-                f"Top result: {top['filename']}, page {top['page_number']}."
-            )
-        else:
-            voice_say = "No matching pages found. Try a different search term."
-        st.markdown(
-            f"<div id='voiceResultMarker' "
-            f"data-token='{st.session_state.voice_result_seq}' "
-            f"data-say=\"{html.escape(voice_say)}\" style='display:none;'></div>",
-            unsafe_allow_html=True,
-        )
- 
-        if not hits:
-            st.info("No matching pages found. Try a different phrasing or check the synonym list.")
-        for result_index, hit in enumerate(hits):
-            with st.container(border=True):
-                c1, c2 = st.columns([1, 5])
-                with c1:
-                    try:
-                        thumb = _render_thumbnail(store, hit["doc_id"], hit["page_number"])
-                        st.image(thumb, width=100)
-                    except Exception:
-                        st.write("📄")
-                with c2:
-                    score_pct = round(hit["score"] * 100)
-                    if score_pct >= 70:
-                        badge_bg, badge_fg = "#ECFDF5", "#047857"
-                    elif score_pct >= 40:
-                        badge_bg, badge_fg = "#FFFBEB", "#B45309"
-                    else:
-                        badge_bg, badge_fg = "#F3F4F6", "#4B5563"
-                    st.markdown(
-                        f"<div style='font-size:15px;'>"
-                        f"<span style='font-weight:600;'>{html.escape(hit['filename'])}</span>"
-                        f" — page {hit['page_number']}"
-                        f"&nbsp;&nbsp;"
-                        f"<span style='background:{badge_bg};color:{badge_fg};"
-                        f"padding:2px 10px;border-radius:999px;font-size:12px;"
-                        f"font-weight:600;'>{score_pct}% match</span>"
-                        f"&nbsp;&nbsp;{_category_badge_html(hit.get('category', 'Uncategorized'))}"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(_highlight(hit["snippet"], hit["highlight_terms"]))
-                    widget_id = f"{hit['doc_id']}_{hit['page_number']}_{result_index}"
-                    _preview_download_controls(hit["doc_id"], hit["filename"], hit["page_number"], widget_id, result_ordinal=result_index + 1)
-                    _favorite_toggle(hit["doc_id"], hit["filename"], hit["page_number"], widget_id)
-    else:
-        browse_category = category_label if category_label != "All categories" else None
-        if browse_category:
-            st.markdown(
-                f"<div style='font-size:15px;font-weight:600;color:#1B2440;margin:8px 0;'>"
-                f"📁 Documents tagged '{html.escape(browse_category)}'</div>",
-                unsafe_allow_html=True,
-            )
-            matching_docs = [d for d in docs if d.get("category", "Uncategorized") == browse_category]
-            if not matching_docs:
-                st.caption("No documents tagged with this category yet.")
-            else:
-                for d in matching_docs:
-                    st.write(f"📄 {d['filename']}")
-            st.caption("Type a query above to search within this category.")
-        else:
-            col_recent, col_tips = st.columns([2, 1])
-            with col_recent:
-                recent = user_data.get_history(store, viewer_email, limit=6) if viewer_email else []
-                header_l, header_r = st.columns([3, 1.6])
-                with header_l:
-                    st.markdown(
-                        "<div style='font-size:15px;font-weight:700;color:#1B2440;margin-bottom:6px;'>🕐 Recent Searches</div>",
-                        unsafe_allow_html=True,
-                    )
-                with header_r:
-                    if recent:
-                        if st.button("View all history →", key="view_all_history", use_container_width=True):
-                            st.session_state.nav = "history"
-                            st.rerun()
-                if not viewer_email:
-                    st.caption("Enter your name in the sidebar to keep a history of your searches.")
-                elif not recent:
-                    st.caption("No searches yet -- try typing something above.")
-                else:
-                    for i, entry in enumerate(recent):
-                        _render_history_row(entry, "recent", i)
-            with col_tips:
-                st.markdown(
-                    """
-                    <div style="background:#FFFBEB;border-radius:12px;padding:16px 18px;">
-                      <div style="font-size:14px;font-weight:700;color:#92400E;margin-bottom:8px;">💡 Search Tips</div>
-                      <div style="font-size:13px;color:#78350F;line-height:1.7;">
-                        1. Use specific error codes or part numbers for the tightest matches.<br/>
-                        2. Narrow to one document with the "Search within" dropdown.<br/>
-                        3. Tap 🎤 and speak your query instead of typing.<br/>
-                        4. Browse a category card above to see what's tagged there.<br/>
-                        5. Star a result to save it under Favorites for later.
-                      </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
+            for i in ranked:
+                if sims[i] <= 0:
+                    break
+                if len(hits) >= top_k:
+                    break
+                if i >= len(self.records):
+                    # Defensive only -- add_document/remove_document now
+                    # roll back on a failed save specifically so records
+                    # and matrix can't drift apart, but this costs
+                    # nothing and means a search degrades gracefully
+                    # instead of crashing the page if that invariant is
+                    # ever violated some other way.
+                    continue
+                r = self.records[i]
+                page_key = (r["doc_id"], r["page_number"])
+                if page_key in seen_pages:
+                    continue
+                seen_pages.add(page_key)
+                hits.append(
+                    {
+                        "doc_id": r["doc_id"],
+                        "filename": r["filename"],
+                        "page_number": r["page_number"],
+                        "snippet": r["text"],
+                        "score": float(sims[i]),
+                        "highlight_terms": highlight_terms,
+                        "category": r.get("category", "Uncategorized"),
+                    }
                 )
- 
-    # -----------------------------------------------------------------
-    # Library management
-    # -----------------------------------------------------------------
-    with st.expander(f"📚 Document library ({len(docs)} files)"):
-        if "uploader_key" not in st.session_state:
-            st.session_state.uploader_key = 0
-        if "last_uploaded_signature" not in st.session_state:
-            st.session_state.last_uploaded_signature = None
- 
-        upload_col, category_col = st.columns([3, 1])
-        with upload_col:
-            uploaded = st.file_uploader(
-                "Add a PDF to the shared library",
-                type=["pdf"],
-                key=f"uploader_{st.session_state.uploader_key}",
-            )
-        with category_col:
-            upload_category = st.selectbox("Category", CATEGORY_NAMES, key="upload_category")
- 
-        if uploaded is not None:
-            data = uploaded.getvalue()
-            signature = (uploaded.name, len(data))
-            if signature == st.session_state.last_uploaded_signature:
-                # Same file as the last successful upload -- the widget
-                # hasn't been swapped out yet, ignore this rerun's copy.
-                pass
-            else:
-                import pymupdf as fitz
- 
-                doc = fitz.open(stream=data, filetype="pdf")
-                pages = [
-                    {"page_number": i + 1, "text": p.get_text("text")}
-                    for i, p in enumerate(doc)
-                ]
-                doc.close()
-                if not any(p["text"].strip() for p in pages):
-                    st.error(
-                        "No extractable text found -- this looks like a scanned/image-only "
-                        "PDF, which needs OCR before it can be indexed (not enabled here)."
-                    )
-                else:
-                    try:
-                        # doc_id is the filename, not the id upload_bytes()
-                        # returns -- see drive_store.py's module docstring.
-                        store.upload_bytes(uploaded.name, data)
-                        chunks = chunk_pages(pages)
-                        index.add_document(uploaded.name, uploaded.name, chunks, category=upload_category)
-                    except Exception as e:
-                        st.error(
-                            f"Upload failed: {e}. This is usually a brief "
-                            "network hiccup talking to Google Drive -- try again."
-                        )
-                    else:
-                        st.session_state.last_uploaded_signature = signature
-                        st.session_state.uploader_key += 1
-                        st.success(f"Indexed {uploaded.name} ({len(pages)} pages, tagged '{upload_category}').")
-                        st.rerun()
- 
-        for d in docs:
-            row1, row2, row3 = st.columns([3, 2, 1])
-            row1.write(d["filename"])
-            with row2:
-                doc_category = d.get("category", "Uncategorized")
-                current_cat = doc_category if doc_category in CATEGORY_NAMES else CATEGORY_NAMES[0]
-                new_cat = st.selectbox(
-                    "Category",
-                    CATEGORY_NAMES,
-                    index=CATEGORY_NAMES.index(current_cat),
-                    key=f"cat_{d['doc_id']}",
-                    label_visibility="collapsed",
-                )
-                if new_cat != doc_category:
-                    try:
-                        index.set_category(d["doc_id"], new_cat)
-                    except Exception as e:
-                        st.error(f"Couldn't update category: {e}")
-                    else:
-                        st.rerun()
-            if row3.button("Delete", key=f"del_{d['doc_id']}"):
-                try:
-                    # d["doc_id"] is the filename -- resolve it to whatever
-                    # Drive file id it currently has before deleting (see
-                    # drive_store.py's module docstring). If it's already
-                    # gone from Drive, there's nothing left to delete there
-                    # anyway -- still remove the now-dangling library entry
-                    # instead of getting stuck unable to clear it out.
-                    try:
-                        real_id = store.resolve_doc_id(d["doc_id"])
-                    except FileNotFoundError:
-                        real_id = None
-                    index.remove_document(d["doc_id"])
-                    if real_id:
-                        store.delete_file(real_id)
-                except Exception as e:
-                    st.error(
-                        f"Couldn't delete {d['filename']}: {e}. This is usually "
-                        "a brief network hiccup talking to Google Drive -- try again."
-                    )
-                else:
-                    st.rerun()
- 
-        # -----------------------------------------------------------------
-        # Rebuild search index from Drive
-        #
-        # doc_id is now the filename (see drive_store.py's module
-        # docstring), resolved to whatever Drive file id it currently has
-        # at the moment of each preview/download via resolve_doc_id() --
-        # which on its own already recovers from a file's id quietly
-        # changing after it was indexed (observed in practice: other
-        # people/computers with this same Shared Drive mounted via Google
-        # Drive for Desktop can cause a file to effectively get replaced,
-        # new id, rather than edited in place, with nothing visibly
-        # different about it in the Drive UI). So this button is no longer
-        # the primary fix for a 404 "File not found" the way it first was
-        # -- it still exists for two real reasons: (1) migrating a search
-        # index that still has the *old* scheme's raw Drive ids baked in
-        # as doc_id (from before this file resolved by name), and (2)
-        # picking up PDFs someone added directly in Drive, outside the
-        # uploader above, or refreshing extracted text after a PDF's
-        # content changed. Rescans whatever folder drive_folder_id
-        # currently points at, re-extracts text from every PDF found there
-        # right now, and replaces the whole index with fresh records,
-        # carrying forward each file's existing category by matching on
-        # filename so re-tagging isn't lost.
-        st.markdown("---")
-        st.caption(
-            "📚 Previews or downloads failing with \"File not found\"? Every lookup "
-            "now re-resolves a file's current Drive id by name automatically, so "
-            "this shouldn't happen anymore for files already in the index -- but a "
-            "rebuild is still useful after adding PDFs directly in Drive (outside "
-            "the uploader above), or to migrate an older index built before this "
-            "fix."
-        )
-        if st.button("🔄 Rebuild search index from Drive", key="rebuild_index_btn"):
-            st.session_state.rebuild_index_requested = True
-            st.rerun()
- 
-        if st.session_state.get("rebuild_index_requested"):
-            old_category_by_filename = {d["filename"]: d.get("category", "Uncategorized") for d in docs}
-            try:
-                drive_files = store.list_files()
-            except Exception as e:
-                st.session_state.rebuild_index_requested = False
-                st.error(f"Couldn't list files in Drive: {e}")
-            else:
-                pdf_files = [f for f in drive_files if f["name"].lower().endswith(".pdf")]
-                progress = st.progress(0.0, text=f"Rebuilding index -- 0 / {len(pdf_files)} files...")
-                new_records = []
-                failures = []
-                for i, f in enumerate(pdf_files):
-                    progress.progress(
-                        i / max(len(pdf_files), 1),
-                        text=f"Rebuilding index -- processing {f['name']} ({i + 1} / {len(pdf_files)})...",
-                    )
-                    try:
-                        import pymupdf as fitz
- 
-                        data = store.download_bytes(f["id"])
-                        doc = fitz.open(stream=data, filetype="pdf")
-                        pages = [
-                            {"page_number": pi + 1, "text": p.get_text("text")}
-                            for pi, p in enumerate(doc)
-                        ]
-                        doc.close()
-                        chunks = chunk_pages(pages)
-                        category = old_category_by_filename.get(f["name"], "Uncategorized")
-                        for c in chunks:
-                            new_records.append({
-                                # doc_id = filename, not f["id"] -- see
-                                # drive_store.py's module docstring on why
-                                # a cached Drive file id isn't trustworthy
-                                # here. download_bytes(f["id"]) above still
-                                # uses the real id, since that's the one
-                                # list_files() just handed us a moment ago.
-                                "doc_id": f["name"],
-                                "filename": f["name"],
-                                "page_number": c["page_number"],
-                                "text": c["text"],
-                                "category": category,
-                            })
-                    except Exception as e:
-                        failures.append((f["name"], str(e)))
-                progress.progress(1.0, text="Saving rebuilt index...")
-                try:
-                    index.replace_all(new_records)
-                except Exception as e:
-                    st.error(f"Rebuild failed while saving the new index: {e}. Try again.")
-                else:
-                    st.session_state.rebuild_index_requested = False
-                    succeeded = len(pdf_files) - len(failures)
-                    if failures:
-                        st.warning(
-                            f"Rebuilt {succeeded} / {len(pdf_files)} documents "
-                            f"({len(new_records)} pages indexed). These failed and were "
-                            "skipped -- try again for just these: "
-                            + ", ".join(f"{n} ({e})" for n, e in failures)
-                        )
-                    else:
-                        st.success(
-                            f"Rebuilt the index: {succeeded} documents, "
-                            f"{len(new_records)} pages indexed."
-                        )
-                    st.rerun()
- 
-elif view == "history":
-    st.markdown("<div style='font-size:22px;font-weight:700;color:#1B2440;margin-bottom:12px;'>🕐 My History</div>", unsafe_allow_html=True)
-    if not viewer_email:
-        st.info("Enter your name in the sidebar (under the navigation) to start building your history.")
-    else:
-        history = user_data.get_history(store, viewer_email)
-        if not history:
-            st.caption("No searches yet -- head to Search and look something up.")
-        else:
-            for i, entry in enumerate(history):
-                _render_history_row(entry, "myhist", i)
- 
-elif view == "favorites":
-    st.markdown("<div style='font-size:22px;font-weight:700;color:#1B2440;margin-bottom:12px;'>☆ Favorites</div>", unsafe_allow_html=True)
-    if not viewer_email:
-        st.info("Enter your name in the sidebar (under the navigation) to start saving pages.")
-    else:
-        favorites = user_data.get_favorites(store, viewer_email)
-        if not favorites:
-            st.caption("No favorites yet -- star a result from Search to save it here.")
-        for fav in favorites:
-            with st.container(border=True):
-                fc1, fc2 = st.columns([1, 5])
-                with fc1:
-                    try:
-                        thumb = _render_thumbnail(store, fav["doc_id"], fav["page_number"])
-                        st.image(thumb, width=100)
-                    except Exception:
-                        st.write("📄")
-                with fc2:
-                    st.markdown(
-                        f"<div style='font-size:15px;font-weight:600;'>{html.escape(fav['filename'])}</div>"
-                        f"<div style='font-size:12px;color:#6b7280;'>page {fav['page_number']}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    widget_id = f"fav_{fav['doc_id']}_{fav['page_number']}"
-                    _preview_download_controls(fav["doc_id"], fav["filename"], fav["page_number"], widget_id)
-                    if st.button("★ Remove from favorites", key=f"unfav_{widget_id}"):
-                        user_data.toggle_favorite(store, viewer_email, fav["doc_id"], fav["filename"], fav["page_number"])
-                        st.rerun()
- 
-elif view == "about":
-    st.markdown("<div style='font-size:22px;font-weight:700;color:#1B2440;margin-bottom:12px;'>ℹ️ About</div>", unsafe_allow_html=True)
-    with st.container(border=True):
-        st.markdown(
-            """
-            **Technical Manual Search** indexes every PDF service manual in the shared
-            Google Drive library so anyone on the team can find the right page by
-            keyword or by voice, instead of opening manuals one at a time.
- 
-            **Categories** — each uploaded manual is tagged as one of: """
-            + ", ".join(f"{m['icon']} {name}" for name, m in CATEGORY_META.items())
-            + """. Use the category cards or the Category filter on the Search page to
-            browse by type.
- 
-            **My History / Favorites** — enter your name in the sidebar (under the
-            navigation) to get a private, per-person search history and a list of
-            starred pages, saved alongside the shared library under that name.
-            It's not a real login (nothing stops someone from typing a colleague's
-            name), so please only use your own name -- everyone's history and
-            favorites stay separate as long as everyone does.
- 
-            **Adding or removing documents** — anyone with access to this app can
-            upload or delete PDFs from the Document library (bottom of the Search
-            page); uploads go into the same shared Drive folder for everyone.
- 
-            **Access** — this app is restricted to specific Horizon email addresses.
-            To be added, or if something looks broken, contact
-            technical.support@horizon.co.jp.
-            """
-        )
- 
-    with st.container(border=True):
-        st.markdown(
-            """
-            **System architecture & software**
- 
-            - **Web app**: built with Streamlit, an open-source Python web app framework.
-            - **Hosting**: runs on Streamlit Community Cloud (free hosting); the source
-              code lives in a GitHub repo, and pushing changes redeploys the app
-              automatically.
-            - **File storage**: PDFs and the search index live in the company's shared
-              Google Drive folder — the app only reads from it and doesn't keep a
-              separate copy of anything.
-            - **Search engine**: uses TF-IDF, a standard text-matching algorithm that
-              runs entirely inside the app. No external AI service is used, and manual
-              content is never sent to a third party.
- 
-            **Security**
- 
-            - **Access control**: Streamlit Community Cloud is configured to let only
-              specific email addresses open this app.
-            - **File permissions**: documents live in the company's Google Drive, so
-              access follows Drive's own sharing settings — no separate storage system
-              was built for this.
-            - **Credentials**: the Google Drive connection credentials are stored
-              encrypted on Streamlit's side and never appear in the source code.
-            - **Encryption**: all traffic is served over HTTPS.
- 
-            **Where files are stored**
- 
-            All PDFs, the search index, and everyone's search history/favorites live in
-            the company's shared Google Drive folder — the single source of truth. The
-            app itself doesn't persist any files, so nothing is lost even if it restarts.
-            """
-        )
- 
-    # Japanese translations of the two boxes above, for colleagues who read
-    # this page in Japanese -- kept as separate boxes (rather than replacing
-    # the English text) so both languages stay available on the same page.
-    with st.container(border=True):
-        st.markdown(
-            """
-            **Technical Manual Search** は、共有 Google Drive 上のすべての PDF サービス
-            マニュアルを検索対象とし、チームの誰もがキーワードや音声で目的のページをすぐに
-            見つけられるようにするツールです。マニュアルを一つずつ開いて探す必要がなくなります。
- 
-            **カテゴリ** — アップロードされた各マニュアルは、次のいずれかに分類されます：
-            🔧 Service Manual（整備マニュアル）、⚙️ Parts Book（パーツブック）、
-            📄 Specifications（仕様書）、⚠️ Error Code（エラーコード）、
-            📖 Procedure（作業手順）、🔗 Installation（設置）。検索ページのカテゴリカード、
-            またはカテゴリフィルターで種類ごとに絞り込めます。
- 
-            **マイ履歴 / お気に入り** — サイドバー（ナビゲーションの下）に自分の名前を
-            入力すると、検索履歴とお気に入りページの一覧が、その名前のもとで個人ごとに
-            保存されます。正式なログインではないため（他の人の名前を入力することも技術的
-            には可能です）、必ずご自身の名前をご入力ください。全員がそうすることで、
-            各自の履歴とお気に入りが分離された状態を保てます。
- 
-            **資料の追加・削除** — このアプリにアクセスできる人は誰でも、検索ページ下部の
-            「Document library」から PDF をアップロード・削除できます。アップロードされた
-            ファイルは全員共通の Drive フォルダに保存されます。
- 
-            **アクセス** — 本アプリは Horizon の特定のメールアドレスのみに利用が制限されて
-            います。追加登録が必要な場合や、不具合を見つけた場合は
-            technical.support@horizon.co.jp までご連絡ください。
-            """
-        )
- 
-    with st.container(border=True):
-        st.markdown(
-            """
-            **システム構成・使用ソフトウェアについて**
- 
-            - **Webアプリの基盤**：Streamlit（Pythonで作られたオープンソースのWebアプリ
-              開発ツール）を使用しています。
-            - **ホスティング**：Streamlit公式の無料クラウドサービス（Streamlit Community
-              Cloud）上で稼働しており、ソースコードはGitHubのリポジトリで管理し、更新す
-              ると自動的に再デプロイされます。
-            - **ファイル保存先**：PDF原本と検索インデックスは、会社のGoogle Drive共有フォ
-              ルダに保存されています。本アプリはそのフォルダを読み込んで検索を行うだけで、
-              別途ファイルを保持することはありません。
-            - **検索アルゴリズム**：TF-IDFというテキスト検索の基本的なアルゴリズムを使用
-              しており、処理はアプリ内部で完結します。外部のAIサービスは一切使用しておらず、
-              マニュアルの内容が第三者に送信されることもありません。
- 
-            **セキュリティについて**
- 
-            - **アクセス制限**：Streamlit Community Cloud側で「指定したメールアドレスのみ
-              アクセス可能」という設定を行っており、許可リストに登録された社員のみが本ア
-              プリのURLを開くことができます。
-            - **ファイル権限**：資料の実体は会社のGoogle Drive上にあるため、アクセス権限
-              はGoogle Drive自体の共有設定に準じます。新たに独立したストレージ環境を構築
-              しているわけではありません。
-            - **認証情報**：Google Driveへの接続に使用する認証情報は、Streamlit側で暗号化
-              保存されており、ソースコード上には表示されません。
-            - **通信の暗号化**：通信はHTTPSで暗号化されています。
- 
-            **ファイルの保存場所について**
- 
-            PDFマニュアル、検索インデックス、各自の検索履歴・お気に入りは、すべて会社の
-            Google Drive共有フォルダに保存されており、これが唯一のデータ保管場所です。
-            本アプリ自体はファイルを永続的に保持しないため、再起動してもデータが失われる
-            ことはありません。
-            """
-        )
+            return hits
  
