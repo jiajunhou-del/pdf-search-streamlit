@@ -63,7 +63,16 @@ class SearchIndex:
             return 0
         with self._lock:
             previous_records = self.records
-            new_records = list(self.records)
+            # Replace, don't append, if this doc_id (filename) is already
+            # indexed. The production index was found holding
+            # HT300_Service_E.pdf NINE times over (9 x 1380 chunks, each
+            # under a different Drive file id, 8 of them since deleted from
+            # Drive) because every re-upload of the same manual through the
+            # uploader added a whole fresh copy on top of the old ones --
+            # which is exactly why every preview attempt hit a 404 on a
+            # *different* id: search results kept landing on whichever dead
+            # copy happened to rank first.
+            new_records = [r for r in self.records if r["doc_id"] != doc_id]
             for c in chunks:
                 new_records.append(
                     {
@@ -129,6 +138,15 @@ class SearchIndex:
             except Exception:
                 self.records = previous_records
                 raise
+            # Free the old TF-IDF model before fitting the new one, so the
+            # two never sit in memory side by side (searches are blocked on
+            # self._lock for the duration anyway, so nothing can observe
+            # the brief gap). previous_records goes too -- on a ~1GB
+            # instance, keeping a second full copy of the index alive
+            # through the refit is a real cost.
+            self.vectorizer = None
+            self.matrix = None
+            previous_records = None
             self._rebuild()
  
     def list_documents(self):
