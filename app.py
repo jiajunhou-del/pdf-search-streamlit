@@ -501,24 +501,50 @@ def _goto_search(prefill_query: str = None, prefill_category: str = None):
 # a new value on, exactly as if a person had typed it and clicked away.
 #
 # "Hands-free mode" (added for engineers wearing work gloves who can't
-# click a mic button between every search): a single tap turns on
-# *continuous* recognition (recog.continuous = true) instead of the old
-# one-shot "click, speak once, done" flow. The key fact that makes this
-# safe across searches is something confirmed empirically with Playwright
-# against a live local run: st.components.v1.html() re-sends the exact
-# same HTML string on every Streamlit rerun, and because React sees an
-# unchanged iframe srcdoc, it does NOT tear the iframe down and reload it
-# -- the running `recog` object (and its continuous-listening state)
-# survives every search, not just the one that's currently on screen.
-# (Verified by watching a console.log fired at script top-level NOT
-# re-fire across repeated searches once the page had settled.) That's
-# also why this can't simply reset its own state every render the way the
-# main Python script does -- it is only ever truly re-created on a full
-# page reload.
+# click a mic button between every search): continuous recognition
+# (recog.continuous = true) instead of the old one-shot "click, speak
+# once, done" flow. The key fact that makes this safe across searches is
+# something confirmed empirically with Playwright against a live local
+# run: st.components.v1.html() re-sends the exact same HTML string on
+# every Streamlit rerun, and because React sees an unchanged iframe
+# srcdoc, it does NOT tear the iframe down and reload it -- the running
+# `recog` object (and its listening state) survives every search, not
+# just the one that's currently on screen. (Verified by watching a
+# console.log fired at script top-level NOT re-fire across repeated
+# searches once the page had settled.) That's also why this can't simply
+# reset its own state every render the way the main Python script does --
+# it is only ever truly re-created on a full page reload.
 #
-# Saying "stop" (or "exit"/"quit"/"cancel") ends hands-free mode again --
-# there's no way to detect a glove tapping a touchscreen reliably, so a
-# spoken exit word is the only hands-free way to turn it back off.
+# Wake word instead of a click to *start* listening, too: a browser will
+# never let JS request the microphone without a real click/tap somewhere
+# -- that one-time permission grant genuinely cannot be scripted around,
+# in any browser, for anyone. But Chrome remembers that grant per site
+# once it's been given, and checking *whether* it was already granted
+# (navigator.permissions.query) does not itself require a gesture. So:
+# first visit ever needs one tap (to produce the permission prompt);
+# every visit after that, this script checks the already-granted
+# permission on load and starts listening immediately on its own -- no
+# tap, every time, from then on.
+#
+# With that always-on listening, though, *every* sentence anyone says
+# near the laptop would otherwise get typed into the search box --
+# coworkers talking, a PA announcement, radio chatter. So once listening
+# has started it sits idle until an utterance contains the wake word
+# ("guide"); only the words *after* it are treated as a command, and
+# anything without the wake word is ignored outright (briefly shown in
+# the status line so the mic's obviously still alive, but never searched
+# or spoken). Say the wake word and the query together in one breath,
+# e.g. "guide BQ300 service manual". "stop"/"exit"/"quit"/"cancel" are
+# the one exception -- they work on their own, without the wake word, as
+# an unconditional way to pause listening if anything seems to be
+# misbehaving.
+#
+# Worth the person knowing, not just coded around: always-on listening
+# means audio is continuously sent to the browser's speech recognition
+# service while active (this is Chrome's own cloud recognizer, same as
+# any other site using the Web Speech API) -- fine for one engineer's own
+# use, but worth pausing (the button) rather than leaving on by default
+# in a shared space, for coworkers who haven't agreed to that.
 #
 # Auto-readback: the engineer's eyes are usually on the hardware, not the
 # screen, so after every search Python renders a small invisible marker
@@ -547,15 +573,17 @@ _VOICE_HTML = """
   <button id="micBtn" style="padding:9px 18px;border-radius:999px;border:none;
     background:#2563EB;color:white;font-size:14px;font-weight:500;cursor:pointer;
     box-shadow:0 1px 3px rgba(37,99,235,0.4);">
-    🎤 ハンズフリー検索を開始 / Start hands-free search
+    🎤 マイクを許可する（最初の1回だけ）/ Enable microphone (first time only)
   </button>
   <div id="voiceStatus" style="margin-top:8px;font-size:13px;color:#6b7280;"></div>
 </div>
 <script>
 const btn = document.getElementById('micBtn');
 const statusEl = document.getElementById('voiceStatus');
-const LABEL_OFF = '🎤 ハンズフリー検索を開始 / Start hands-free search';
-const LABEL_ON = '🛑 ハンズフリー中（「ストップ」で終了）/ Listening (say "stop" to end)';
+const WAKE_WORD = 'guide';
+const LABEL_ENABLE = '🎤 マイクを許可する（最初の1回だけ）/ Enable microphone (first time only)';
+const LABEL_LISTENING = '⏸ 一時停止する / Pause listening';
+const LABEL_PAUSED = '▶ 再開する（「' + WAKE_WORD + '」で起動）/ Resume (say "' + WAKE_WORD + '" to activate)';
  
 // Finds the real search <input> in the parent page (see the big comment
 // above) and fills it in the same way a person typing would, then blurs
@@ -611,12 +639,13 @@ if (!SR) {
   recog.interimResults = true;
   recog.maxAlternatives = 1;
  
-  let handsFree = false;       // the mode the person toggles with the button
+  let wantListening = false;   // true unless the person paused it (click or "stop")
   let listening = false;       // whether recog.start() is currently active
   let resultCursor = 0;        // index into e.results already handled this session
   let lastResultToken = null;  // last #voiceResultMarker token we've already read aloud
  
   function startRecognition() {
+    wantListening = true;
     if (listening) return;
     resultCursor = 0;
     try {
@@ -626,24 +655,61 @@ if (!SR) {
     }
   }
  
+  function pauseRecognition(spokenMessage) {
+    wantListening = false;
+    statusEl.innerText = spokenMessage;
+    speak(spokenMessage);
+    try { recog.stop(); } catch (err) {}
+  }
+ 
+  // Only text *after* the wake word is ever treated as a command -- a
+  // stray "guide" said on its own (nothing follows) is acknowledged but
+  // does nothing, rather than silently waiting for a second utterance,
+  // which would need extra state and be easy to leave stuck. The wake
+  // word has to be the *first* word, not just anywhere in the sentence --
+  // tested against real sentences like "please guide me through this"
+  // during development, which would otherwise misfire as a search for
+  // "me" if "guide" were matched anywhere.
+  function extractCommand(text) {
+    const t = text.trim();
+    const lower = t.toLowerCase();
+    if (!lower.startsWith(WAKE_WORD)) return null;
+    // Require a whole-word match -- "guidebook" shouldn't count as the
+    // wake word just because it starts with the same letters.
+    const nextChar = t.charAt(WAKE_WORD.length);
+    if (nextChar && /[a-zA-Z]/.test(nextChar)) return null;
+    return t.slice(WAKE_WORD.length).replace(/^[\\s,.:;!-]+/, '').trim();
+  }
+ 
   function handleUtterance(text) {
     const normalized = text.trim().toLowerCase().replace(/[.!?]+$/, '');
     if (STOP_WORDS.includes(normalized)) {
-      handsFree = false;
-      statusEl.innerText = 'ハンズフリーモードを終了しました。 / Hands-free mode off.';
-      speak('ハンズフリーモードを終了しました。');
-      try { recog.stop(); } catch (err) {}
+      pauseRecognition('一時停止しました。 / Paused.');
       return;
     }
-    if (fillParentSearchBox(text)) {
-      statusEl.innerText = '✅ "' + text + '" を検索中… / Searching for "' + text + '"';
+    const command = extractCommand(text);
+    if (command === null) {
+      // No wake word in this utterance at all -- background chatter,
+      // most likely. Show it briefly so it's clear the mic is alive and
+      // actually hearing things, but take no action.
+      statusEl.innerText = '👂 (' + text + ')';
+      return;
+    }
+    if (!command) {
+      // Wake word said on its own, nothing after it.
+      statusEl.innerText = 'はい、どうぞ。 / Yes? Go ahead.';
+      speak('はい、どうぞ。');
+      return;
+    }
+    if (fillParentSearchBox(command)) {
+      statusEl.innerText = '✅ "' + command + '" を検索中… / Searching for "' + command + '"';
     }
   }
  
   recog.onstart = () => {
     listening = true;
     btn.classList.add('listening');
-    btn.innerText = LABEL_ON;
+    btn.innerText = LABEL_LISTENING;
   };
   recog.onerror = (e) => {
     const messages = {
@@ -657,21 +723,20 @@ if (!SR) {
     if (msg) {
       statusEl.innerText = msg;
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        handsFree = false;  // these never recover by themselves -- stop retrying
+        wantListening = false;  // these never recover by themselves -- stop retrying
       }
     }
   };
   recog.onend = () => {
     listening = false;
     btn.classList.remove('listening');
-    if (handsFree) {
+    if (wantListening) {
       // Continuous mode can still end on its own (long silence, a brief
       // network hiccup) -- restart automatically so the person doesn't
       // have to touch anything to keep going.
-      btn.innerText = LABEL_ON;
       setTimeout(startRecognition, 300);
     } else {
-      btn.innerText = LABEL_OFF;
+      btn.innerText = LABEL_PAUSED;
     }
   };
   recog.onresult = (e) => {
@@ -690,17 +755,30 @@ if (!SR) {
   };
  
   btn.onclick = () => {
-    if (handsFree) {
-      handsFree = false;
-      statusEl.innerText = 'ハンズフリーモードを終了しました。 / Hands-free mode off.';
-      try { recog.stop(); } catch (err) {}
+    if (listening || wantListening) {
+      pauseRecognition('一時停止しました。 / Paused.');
     } else {
-      handsFree = true;
       statusEl.innerText = '開始しています… / Starting…';
-      speak('ハンズフリーモードを開始しました。品番やキーワードをどうぞ。');
       startRecognition();
     }
   };
+ 
+  // First-ever visit: the mic permission prompt can only ever appear
+  // after a real click, so the button above is the entry point and stays
+  // labelled as a one-time "enable" action until that first grant. Every
+  // visit after that, permissions.query can read the already-granted
+  // state without needing a gesture, so recognition starts immediately
+  // on its own, no tap required. (Not every browser supports querying
+  // 'microphone' this way -- if it throws or comes back anything but
+  // 'granted', this just falls back to waiting for that first tap.)
+  try {
+    navigator.permissions.query({ name: 'microphone' }).then((status) => {
+      if (status.state === 'granted') {
+        statusEl.innerText = '「' + WAKE_WORD + '」と話しかけてください / Say "' + WAKE_WORD + '" to activate';
+        startRecognition();
+      }
+    }).catch(() => {});
+  } catch (err) { /* Permissions API unsupported -- first tap still works fine */ }
  
   // Auto-readback: poll the parent page for a fresh search result, and
   // read the summary aloud -- see the big comment above for why this has
