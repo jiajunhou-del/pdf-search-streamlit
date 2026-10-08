@@ -499,6 +499,37 @@ def _goto_search(prefill_query: str = None, prefill_category: str = None):
 # updating a React-controlled input from outside React), then the input
 # is blurred -- which is what Streamlit's own text_input already commits
 # a new value on, exactly as if a person had typed it and clicked away.
+#
+# "Hands-free mode" (added for engineers wearing work gloves who can't
+# click a mic button between every search): a single tap turns on
+# *continuous* recognition (recog.continuous = true) instead of the old
+# one-shot "click, speak once, done" flow. The key fact that makes this
+# safe across searches is something confirmed empirically with Playwright
+# against a live local run: st.components.v1.html() re-sends the exact
+# same HTML string on every Streamlit rerun, and because React sees an
+# unchanged iframe srcdoc, it does NOT tear the iframe down and reload it
+# -- the running `recog` object (and its continuous-listening state)
+# survives every search, not just the one that's currently on screen.
+# (Verified by watching a console.log fired at script top-level NOT
+# re-fire across repeated searches once the page had settled.) That's
+# also why this can't simply reset its own state every render the way the
+# main Python script does -- it is only ever truly re-created on a full
+# page reload.
+#
+# Saying "stop" (or "exit"/"quit"/"cancel") ends hands-free mode again --
+# there's no way to detect a glove tapping a touchscreen reliably, so a
+# spoken exit word is the only hands-free way to turn it back off.
+#
+# Auto-readback: the engineer's eyes are usually on the hardware, not the
+# screen, so after every search Python renders a small invisible marker
+# div (#voiceResultMarker, see below) carrying a fresh data-token (so this
+# script can tell "a new search just finished" from "nothing changed")
+# and a data-say sentence summarizing the results. This script polls for
+# that token change (there's no event for "the parent script re-ran" to
+# listen for) and reads data-say aloud with the ordinary browser
+# text-to-speech API (speechSynthesis) -- which, unlike the microphone,
+# needs no permission prompt and works fine from inside this iframe
+# directly, no parent-window access required.
 # ---------------------------------------------------------------------------
 _VOICE_HTML = """
 <style>
@@ -516,13 +547,15 @@ _VOICE_HTML = """
   <button id="micBtn" style="padding:9px 18px;border-radius:999px;border:none;
     background:#2563EB;color:white;font-size:14px;font-weight:500;cursor:pointer;
     box-shadow:0 1px 3px rgba(37,99,235,0.4);">
-    🎤 Speak your query
+    🎤 ハンズフリー検索を開始 / Start hands-free search
   </button>
   <div id="voiceStatus" style="margin-top:8px;font-size:13px;color:#6b7280;"></div>
 </div>
 <script>
 const btn = document.getElementById('micBtn');
 const statusEl = document.getElementById('voiceStatus');
+const LABEL_OFF = '🎤 ハンズフリー検索を開始 / Start hands-free search';
+const LABEL_ON = '🛑 ハンズフリー中（「ストップ」で終了）/ Listening (say "stop" to end)';
  
 // Finds the real search <input> in the parent page (see the big comment
 // above) and fills it in the same way a person typing would, then blurs
@@ -552,6 +585,21 @@ function fillParentSearchBox(text) {
   }
 }
  
+// Plain browser text-to-speech -- no permission prompt needed, unlike the
+// mic. .cancel() first so a fast-talking engineer's new sentence doesn't
+// queue up behind (and get read out after) an older one.
+function speak(text) {
+  try {
+    if (!window.speechSynthesis) return;
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = 'ja-JP';
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utter);
+  } catch (err) { /* TTS unsupported here -- silently skip, mic still works */ }
+}
+ 
+const STOP_WORDS = ['stop', 'exit', 'quit', 'cancel', 'stop listening', 'end'];
+ 
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 if (!SR) {
   statusEl.innerText = 'Voice input needs Chrome/Edge (Web Speech API not available here).';
@@ -559,36 +607,116 @@ if (!SR) {
 } else {
   const recog = new SR();
   recog.lang = 'en-US';
+  recog.continuous = true;
   recog.interimResults = true;
   recog.maxAlternatives = 1;
+ 
+  let handsFree = false;       // the mode the person toggles with the button
+  let listening = false;       // whether recog.start() is currently active
+  let resultCursor = 0;        // index into e.results already handled this session
+  let lastResultToken = null;  // last #voiceResultMarker token we've already read aloud
+ 
+  function startRecognition() {
+    if (listening) return;
+    resultCursor = 0;
+    try {
+      recog.start();
+    } catch (err) {
+      // "already started" races can happen right after a restart -- harmless.
+    }
+  }
+ 
+  function handleUtterance(text) {
+    const normalized = text.trim().toLowerCase().replace(/[.!?]+$/, '');
+    if (STOP_WORDS.includes(normalized)) {
+      handsFree = false;
+      statusEl.innerText = 'ハンズフリーモードを終了しました。 / Hands-free mode off.';
+      speak('ハンズフリーモードを終了しました。');
+      try { recog.stop(); } catch (err) {}
+      return;
+    }
+    if (fillParentSearchBox(text)) {
+      statusEl.innerText = '✅ "' + text + '" を検索中… / Searching for "' + text + '"';
+    }
+  }
+ 
   recog.onstart = () => {
-    statusEl.innerText = '🎙️ Listening… speak now';
+    listening = true;
     btn.classList.add('listening');
+    btn.innerText = LABEL_ON;
   };
   recog.onerror = (e) => {
     const messages = {
-      'no-speech': 'No speech detected -- try again.',
-      'not-allowed': 'Microphone access blocked. Allow it in the browser site settings.',
-      'service-not-allowed': 'Microphone access blocked. Allow it in the browser site settings.',
-      'audio-capture': 'No microphone found.',
-      'network': 'Network error during speech recognition.'
+      'no-speech': null,  // expected during normal pauses in continuous mode -- not a real error
+      'not-allowed': 'マイクが許可されていません。ブラウザの設定で許可してください。 / Microphone access blocked.',
+      'service-not-allowed': 'マイクが許可されていません。ブラウザの設定で許可してください。 / Microphone access blocked.',
+      'audio-capture': 'マイクが見つかりません。 / No microphone found.',
+      'network': 'ネットワークエラーが発生しました。 / Network error during speech recognition.'
     };
-    statusEl.innerText = messages[e.error] || ('Voice error: ' + e.error);
-    btn.classList.remove('listening');
-  };
-  recog.onend = () => { btn.classList.remove('listening'); };
-  recog.onresult = (e) => {
-    let text = '';
-    for (let i = 0; i < e.results.length; i++) { text += e.results[i][0].transcript; }
-    if (e.results[e.results.length - 1].isFinal && text.trim()) {
-      if (fillParentSearchBox(text.trim())) {
-        statusEl.innerText = '✅ Searching for: "' + text.trim() + '"';
+    const msg = messages[e.error];
+    if (msg) {
+      statusEl.innerText = msg;
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        handsFree = false;  // these never recover by themselves -- stop retrying
       }
-    } else {
-      statusEl.innerText = text;
     }
   };
-  btn.onclick = () => { statusEl.innerText = 'Starting…'; recog.start(); };
+  recog.onend = () => {
+    listening = false;
+    btn.classList.remove('listening');
+    if (handsFree) {
+      // Continuous mode can still end on its own (long silence, a brief
+      // network hiccup) -- restart automatically so the person doesn't
+      // have to touch anything to keep going.
+      btn.innerText = LABEL_ON;
+      setTimeout(startRecognition, 300);
+    } else {
+      btn.innerText = LABEL_OFF;
+    }
+  };
+  recog.onresult = (e) => {
+    let interim = '';
+    for (let i = resultCursor; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) {
+        resultCursor = i + 1;
+        const text = r[0].transcript.trim();
+        if (text) handleUtterance(text);
+      } else {
+        interim += r[0].transcript;
+      }
+    }
+    if (interim) statusEl.innerText = '🎙️ ' + interim;
+  };
+ 
+  btn.onclick = () => {
+    if (handsFree) {
+      handsFree = false;
+      statusEl.innerText = 'ハンズフリーモードを終了しました。 / Hands-free mode off.';
+      try { recog.stop(); } catch (err) {}
+    } else {
+      handsFree = true;
+      statusEl.innerText = '開始しています… / Starting…';
+      speak('ハンズフリーモードを開始しました。品番やキーワードをどうぞ。');
+      startRecognition();
+    }
+  };
+ 
+  // Auto-readback: poll the parent page for a fresh search result, and
+  // read the summary aloud -- see the big comment above for why this has
+  // to be a poll rather than an event.
+  setInterval(() => {
+    try {
+      const marker = window.parent.document.getElementById('voiceResultMarker');
+      if (!marker) return;
+      const token = marker.getAttribute('data-token');
+      if (token && token !== lastResultToken) {
+        lastResultToken = token;
+        const say = marker.getAttribute('data-say');
+        if (say) speak(say);
+      }
+    } catch (err) { /* parent DOM not ready yet on first load -- ignore */ }
+  }, 600);
 }
 </script>
 """
@@ -860,12 +988,14 @@ if view == "search":
             )
             hits = []
  
+        # Distinct documents, not raw page hits -- "4 documents" reads more
+        # usefully than "7 result(s)" when several hits are different pages
+        # of the same manual. Used both for Recent Searches logging below
+        # and for the hands-free voice readback (see _VOICE_HTML).
+        doc_count = len({h["doc_id"] for h in hits})
+ 
         if viewer_email and query.strip() != st.session_state.get("last_logged_query"):
             st.session_state.last_logged_query = query.strip()
-            # Distinct documents, not raw page hits -- "4 documents" reads
-            # more usefully in Recent Searches than "7 result(s)" when
-            # several of those hits are different pages of the same manual.
-            doc_count = len({h["doc_id"] for h in hits})
             user_data.add_history_entry(
                 store,
                 viewer_email,
@@ -874,6 +1004,27 @@ if view == "search":
                 category=category_label if category_label != "All categories" else None,
                 scope_filename=scope_label if scope_label != "All documents" else None,
             )
+ 
+        # Invisible marker the hands-free voice script polls for (it can't
+        # listen for "the Python script re-ran", so it watches this
+        # instead): a token that changes on every search, plus a
+        # ready-to-speak Japanese summary of what was found. See the big
+        # comment above _VOICE_HTML for why this has to be poll-based.
+        st.session_state.voice_result_seq = st.session_state.get("voice_result_seq", 0) + 1
+        if hits:
+            top = hits[0]
+            voice_say = (
+                f"{doc_count}件の資料で、合計{len(hits)}件のページが見つかりました。"
+                f"一番上の結果は、{top['filename']}、{top['page_number']}ページです。"
+            )
+        else:
+            voice_say = "一致するページが見つかりませんでした。別のキーワードでもう一度お試しください。"
+        st.markdown(
+            f"<div id='voiceResultMarker' "
+            f"data-token='{st.session_state.voice_result_seq}' "
+            f"data-say=\"{html.escape(voice_say)}\" style='display:none;'></div>",
+            unsafe_allow_html=True,
+        )
  
         if not hits:
             st.info("No matching pages found. Try a different phrasing or check the synonym list.")
