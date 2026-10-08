@@ -372,13 +372,31 @@ def _favorite_toggle(doc_id: str, filename: str, page_number: int, widget_id: st
         st.rerun()
  
  
-def _preview_download_controls(doc_id: str, filename: str, page_number: int, widget_id: str):
+def _preview_download_controls(doc_id: str, filename: str, page_number: int, widget_id: str, result_ordinal: int = None):
     """The lazy 'fetch only once asked' Preview / Download control pair,
     shared by search results and the Favorites view. Two-step pattern:
     a button first sets a session_state flag + reruns; only on that next
     rerun does the actual Drive fetch happen and the real widget appear --
     this is what keeps every displayed card from eagerly downloading its
-    full PDF on every search (the original cause of the memory crash)."""
+    full PDF on every search (the original cause of the memory crash).
+ 
+    result_ordinal (search results only, not Favorites) renders an
+    invisible marker div right before the buttons, carrying this card's
+    1-based position in the results list as a data attribute. The
+    hands-free voice script (_VOICE_HTML) uses these markers to figure out
+    which card's buttons belong to "result 2" when someone says "preview
+    the second result" -- it can't just count matching buttons on the
+    page, because a card's "Preview this page" button disappears once
+    that card's preview is already open, which would silently shift every
+    later card's position. Finding the two markers that bracket a card and
+    only looking for buttons between them stays correct regardless of
+    which cards currently have their preview open."""
+    if result_ordinal is not None:
+        st.markdown(
+            f"<div class='voice-result-anchor' data-result-ordinal='{result_ordinal}' "
+            f"style='display:none;'></div>",
+            unsafe_allow_html=True,
+        )
     btn1, btn2 = st.columns([1, 1])
     pv_ready_key = f"pvready_{widget_id}"
     dl_ready_key = f"dlready_{widget_id}"
@@ -424,7 +442,16 @@ def _preview_download_controls(doc_id: str, filename: str, page_number: int, wid
         except Exception as e:
             st.error(f"Couldn't load preview: {e}")
         else:
-            nav1, nav2, nav3 = st.columns([1, 2, 1])
+            # First/Last page exist mainly so hands-free voice mode has a
+            # single button to click for "first page" / "last page" --
+            # without them, jumping to the end of a long manual would mean
+            # simulating dozens of "next page" clicks in a row, which is
+            # slow and fragile (each click is a full Streamlit rerun).
+            nav0, nav1, nav2, nav3, nav4 = st.columns([1, 1, 2, 1, 1])
+            with nav0:
+                if st.button("⏮ First page", key=f"pvfirst_{widget_id}", disabled=current_page <= 1):
+                    st.session_state[pv_page_key] = 1
+                    st.rerun()
             with nav1:
                 if st.button("◀ Previous page", key=f"pvprev_{widget_id}", disabled=current_page <= 1):
                     st.session_state[pv_page_key] = current_page - 1
@@ -437,6 +464,10 @@ def _preview_download_controls(doc_id: str, filename: str, page_number: int, wid
             with nav3:
                 if st.button("Next page ▶", key=f"pvnext_{widget_id}", disabled=current_page >= total_pages):
                     st.session_state[pv_page_key] = current_page + 1
+                    st.rerun()
+            with nav4:
+                if st.button("Last page ⏭", key=f"pvlast_{widget_id}", disabled=current_page >= total_pages):
+                    st.session_state[pv_page_key] = total_pages
                     st.rerun()
             st.image(page_img, use_container_width=True)
  
@@ -562,6 +593,53 @@ def _goto_search(prefill_query: str = None, prefill_category: str = None):
 # text-to-speech API (speechSynthesis) -- which, unlike the microphone,
 # needs no permission prompt and works fine from inside this iframe
 # directly, no parent-window access required.
+#
+# Action commands ("preview", "download", "next page", ...): once an
+# engineer can search hands-free, the next friction point is still having
+# to reach over and click to actually open/download/page through a result.
+# This reuses the exact same same-origin DOM-access trick as
+# fillParentSearchBox -- except instead of writing into the search <input>,
+# it finds and .click()s the real Streamlit <button> in the parent page
+# that a person would otherwise click by hand. A raw .click() on the
+# native element fires a real bubbling "click" event, which is all React's
+# synthetic event system needs to run the button's own onClick handler --
+# indistinguishable from a person actually clicking it.
+#
+# The hard part isn't clicking a button, it's finding the *right* one: a
+# search can return up to 8 results, each with its own "Preview this
+# page" / "Download PDF" / page-nav buttons, and every card's buttons have
+# the exact same label text as every other card's. Matching "the first
+# button on the page whose text says Preview" breaks the moment any
+# earlier card's preview is already open, because that card's own
+# "Preview this page" button disappears once open (see
+# _preview_download_controls) -- which silently shifts what "the next
+# matching button" even refers to. So Python renders an invisible marker
+# div before each card (class="voice-result-anchor", see
+# _preview_download_controls) carrying that card's 1-based position as a
+# data attribute, and buttonsForOrdinal() below finds the two markers that
+# bracket a given ordinal and only looks for buttons *between* them in
+# document order -- correct no matter which cards currently have their
+# preview open, since it's purely positional and never depends on what's
+# currently visible.
+#
+# Command words are intentionally a small fixed vocabulary ("preview",
+# "download", "next/previous/first/last page") rather than an attempt at
+# open-ended natural language, matching the same reasoning as STOP_WORDS
+# above: a short, documented, keyword-anchored set is predictable and hard
+# to mis-trigger by accident, where a looser parser would risk firing on
+# an ordinary search query that happens to contain one of those words
+# (e.g. a manual section literally titled "Download Mode"). An ordinal
+# ("result two" / "the second one" / a bare "2") picks which result a
+# command applies to; page-nav commands with no ordinal act on whichever
+# result was most recently previewed (lastPreviewedOrdinal), since by then
+# the person is almost always paging through the one they just opened, not
+# result #1 again. Downloading is still the same two-step
+# session_state-flag-then-rerun dance as a manual click (see
+# _preview_download_controls), so clicking "Download PDF" alone doesn't
+# yet produce a file -- the poll loop that already exists for
+# auto-readback also watches for a pending download's "Save PDF" button to
+# appear after that rerun and clicks it the moment it does, so the voice
+# command completes the whole flow without a second utterance.
 # ---------------------------------------------------------------------------
 _VOICE_HTML = """
 <style>
@@ -582,6 +660,10 @@ _VOICE_HTML = """
     🎤 Enable microphone (first time only)
   </button>
   <div id="voiceStatus" style="margin-top:8px;font-size:13px;color:#6b7280;"></div>
+  <div style="margin-top:4px;font-size:11px;color:#9ca3af;">
+    Say "guide" to start, then: your search &middot; "preview" / "preview result 2" &middot;
+    "download" &middot; "next page" / "previous page" &middot; "first page" / "last page" &middot; "stop"
+  </div>
 </div>
 <script>
 const btn = document.getElementById('micBtn');
@@ -616,6 +698,172 @@ function fillParentSearchBox(text) {
   } catch (err) {
     statusEl.innerText = 'Could not fill the search box automatically -- copy this: "' + text + '"';
     return false;
+  }
+}
+ 
+// Picks which result a voice command applies to. Looks for a word form
+// ("second", "two") or a bare digit anywhere in the utterance; returns
+// null if none is found, so the caller can fall back to a sensible
+// default instead of guessing.
+const ORDINAL_WORDS = {
+  first: 1, one: 1, '1st': 1,
+  second: 2, two: 2, '2nd': 2,
+  third: 3, three: 3, '3rd': 3,
+  fourth: 4, four: 4, '4th': 4,
+  fifth: 5, five: 5, '5th': 5,
+  sixth: 6, six: 6, '6th': 6,
+  seventh: 7, seven: 7, '7th': 7,
+  eighth: 8, eight: 8, '8th': 8,
+  top: 1,
+};
+function extractOrdinal(text) {
+  const words = text.split(/\\s+/);
+  for (const w of words) {
+    const clean = w.replace(/[^a-z0-9]/g, '');
+    if (clean in ORDINAL_WORDS) return ORDINAL_WORDS[clean];
+    if (/^\\d+$/.test(clean)) return parseInt(clean, 10);
+  }
+  return null;
+}
+ 
+// Remembers which result ordinal a page-nav command ("next page") should
+// act on when the utterance didn't name one -- almost always whichever
+// result the person most recently opened a preview for.
+let lastPreviewedOrdinal = 1;
+// Set right after clicking a result's "Download PDF" button; the poll
+// loop below watches for that same result's "Save PDF" button to appear
+// (it only exists after Streamlit's next rerun) and clicks it once, so a
+// single voice command finishes the whole two-step download.
+// pendingDownloadDeadline bounds how long it keeps watching, so a failed
+// fetch (see _preview_download_controls' error branch, which never
+// produces a "Save PDF" button at all) doesn't leave this checking forever.
+let pendingDownloadOrdinal = null;
+let pendingDownloadDeadline = 0;
+ 
+// Finds every .voice-result-anchor marker Python renders just before each
+// search result's buttons (see _preview_download_controls), sorted into
+// document order. These exist purely so action commands can tell which
+// card "result 2" refers to without depending on which of that card's
+// buttons currently happen to be visible -- see the big comment above.
+function getResultAnchors() {
+  try {
+    const doc = window.parent.document;
+    const anchors = Array.from(doc.querySelectorAll('.voice-result-anchor'))
+      .map((el) => ({ el, ordinal: parseInt(el.getAttribute('data-result-ordinal'), 10) }))
+      .filter((a) => !isNaN(a.ordinal));
+    anchors.sort((a, b) => {
+      const pos = a.el.compareDocumentPosition(b.el);
+      if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+      if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+      return 0;
+    });
+    return anchors;
+  } catch (err) {
+    return [];
+  }
+}
+ 
+// Every button in the parent page, between the anchor for `ordinal` and
+// the anchor for the next ordinal (or the end of the document, for the
+// last result), whose visible text matches labelRegex. This is what lets
+// "preview result 2" find result 2's button even if result 1's preview is
+// already open and its own "Preview this page" button has disappeared.
+function buttonsForOrdinal(ordinal, labelRegex) {
+  try {
+    const doc = window.parent.document;
+    const anchors = getResultAnchors();
+    const anchor = anchors.find((a) => a.ordinal === ordinal);
+    if (!anchor) return [];
+    const nextAnchor = anchors.find((a) => a.ordinal === ordinal + 1);
+    const isAfterAnchor = (el) => !!(anchor.el.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const isBeforeNext = (el) => !nextAnchor || !!(el.compareDocumentPosition(nextAnchor.el) & Node.DOCUMENT_POSITION_FOLLOWING);
+    return Array.from(doc.querySelectorAll('button')).filter((b) => {
+      if (!isAfterAnchor(b) || !isBeforeNext(b)) return false;
+      return labelRegex.test(b.innerText || b.textContent || '');
+    });
+  } catch (err) {
+    return [];
+  }
+}
+ 
+function previewResult(ordinal) {
+  const openBtn = buttonsForOrdinal(ordinal, /preview this page/i);
+  if (openBtn.length) {
+    openBtn[0].click();
+    lastPreviewedOrdinal = ordinal;
+    statusEl.innerText = '👀 Opening preview for result ' + ordinal + '...';
+    return;
+  }
+  // No "Preview this page" button left to click -- either it's already
+  // open (nav buttons present instead) or there's no such result at all.
+  const alreadyOpen = buttonsForOrdinal(ordinal, /next page|previous page/i);
+  if (alreadyOpen.length) {
+    lastPreviewedOrdinal = ordinal;
+    statusEl.innerText = 'Result ' + ordinal + ' is already open.';
+    return;
+  }
+  statusEl.innerText = '⚠️ No result #' + ordinal + '.';
+  speak('I could not find result ' + ordinal + '.');
+}
+ 
+function downloadResult(ordinal) {
+  // Not anchored/exact -- the real label has a leading icon ("⬇️ Download
+  // PDF"), same lesson as pageNav's regexes above. Excludes "save pdf" so
+  // this doesn't also match the *other* button once it appears.
+  const prepBtn = buttonsForOrdinal(ordinal, /download pdf/i);
+  if (prepBtn.length) {
+    prepBtn[0].click();
+    pendingDownloadOrdinal = ordinal;
+    pendingDownloadDeadline = Date.now() + 8000;
+    statusEl.innerText = '⬇️ Preparing download for result ' + ordinal + '...';
+    return;
+  }
+  const saveBtn = buttonsForOrdinal(ordinal, /save pdf/i);
+  if (saveBtn.length) {
+    saveBtn[0].click();
+    statusEl.innerText = '✅ Downloading result ' + ordinal + '.';
+    return;
+  }
+  statusEl.innerText = '⚠️ No result #' + ordinal + '.';
+  speak('I could not find result ' + ordinal + '.');
+}
+ 
+function pageNav(ordinal, label, regex) {
+  const btn = buttonsForOrdinal(ordinal, regex);
+  if (btn.length && !btn[0].disabled) {
+    btn[0].click();
+    lastPreviewedOrdinal = ordinal;
+    statusEl.innerText = label + ' (result ' + ordinal + ').';
+    return;
+  }
+  statusEl.innerText = '⚠️ No open preview to ' + label.toLowerCase() + ' for result ' + ordinal + ' -- say "preview" first.';
+}
+ 
+// Tries each action command in turn; falls through to treating the whole
+// utterance as a search query if none match. Kept to a small fixed set of
+// keywords (not open-ended parsing) so it stays predictable -- see the big
+// comment above for why.
+function routeCommand(text) {
+  const normalized = text.trim().toLowerCase().replace(/[.!?]+$/, '');
+  if (!normalized) return;
+  const short = normalized.split(/\\s+/).length <= 6;
+  const explicitOrdinal = extractOrdinal(normalized);
+  const ordinal = explicitOrdinal || lastPreviewedOrdinal;
+ 
+  // Note: these match *anywhere* in the button's visible text, not
+  // anchored to the start -- the real labels have a leading icon
+  // ("⏮ First page", "◀ Previous page"), which an anchored /^.../ missed
+  // entirely during testing (Next/Last happened to still pass, since
+  // their icon is trailing, which is what made this easy to miss).
+  if (short && /\\blast\\s+page\\b/.test(normalized)) { pageNav(ordinal, 'Last page', /last page/i); return; }
+  if (short && /\\bfirst\\s+page\\b/.test(normalized)) { pageNav(ordinal, 'First page', /first page/i); return; }
+  if (short && (/\\bnext\\s+page\\b/.test(normalized) || normalized === 'next')) { pageNav(ordinal, 'Next page', /next page/i); return; }
+  if (short && (/\\bprevious\\s+page\\b/.test(normalized) || /\\bgo\\s+back\\b/.test(normalized) || normalized === 'back' || normalized === 'previous')) { pageNav(ordinal, 'Previous page', /previous page/i); return; }
+  if (short && /\\bdownload\\b/.test(normalized)) { downloadResult(explicitOrdinal || 1); return; }
+  if (short && (/\\bpreview\\b/.test(normalized) || (/\\bresult\\b/.test(normalized) && /^(open|show)\\b/.test(normalized)))) { previewResult(explicitOrdinal || 1); return; }
+ 
+  if (fillParentSearchBox(text)) {
+    statusEl.innerText = '✅ Searching for "' + text + '"';
   }
 }
  
@@ -729,11 +977,9 @@ if (!SR) {
     }
     if (sessionActive) {
       // Already in a session -- no need to repeat the wake word, this
-      // utterance IS the query.
+      // utterance IS the query (or an action command -- see routeCommand).
       armSessionTimeout();
-      if (fillParentSearchBox(text)) {
-        statusEl.innerText = '✅ Searching for "' + text + '"';
-      }
+      routeCommand(text);
       return;
     }
     const command = extractCommand(text);
@@ -749,9 +995,7 @@ if (!SR) {
     // waiting for a separate utterance that may never come.
     startSession();
     if (command) {
-      if (fillParentSearchBox(command)) {
-        statusEl.innerText = '✅ Searching for "' + command + '"';
-      }
+      routeCommand(command);
     } else {
       statusEl.innerText = 'Listening -- go ahead (no need to say "' + WAKE_WORD + '" again).';
       speak('Yes, go ahead.');
@@ -846,6 +1090,25 @@ if (!SR) {
         if (say) speak(say);
       }
     } catch (err) { /* parent DOM not ready yet on first load -- ignore */ }
+ 
+    // Completes a voice-triggered download: "Download PDF" only arms the
+    // fetch (see _preview_download_controls' two-step pattern) and the
+    // real "Save PDF" button doesn't exist until Streamlit's next rerun
+    // finishes, which this script can't wait for synchronously -- so it
+    // just keeps checking here until that button shows up, then clicks it
+    // once on its own.
+    if (pendingDownloadOrdinal !== null) {
+      const saveBtn = buttonsForOrdinal(pendingDownloadOrdinal, /save pdf/i);
+      if (saveBtn.length) {
+        const ordinal = pendingDownloadOrdinal;
+        pendingDownloadOrdinal = null;
+        saveBtn[0].click();
+        statusEl.innerText = '✅ Downloading result ' + ordinal + '.';
+      } else if (Date.now() > pendingDownloadDeadline) {
+        statusEl.innerText = '⚠️ Download for result ' + pendingDownloadOrdinal + ' timed out -- try again.';
+        pendingDownloadOrdinal = null;
+      }
+    }
   }, 600);
 }
 </script>
@@ -1191,7 +1454,7 @@ if view == "search":
                     )
                     st.markdown(_highlight(hit["snippet"], hit["highlight_terms"]))
                     widget_id = f"{hit['doc_id']}_{hit['page_number']}_{result_index}"
-                    _preview_download_controls(hit["doc_id"], hit["filename"], hit["page_number"], widget_id)
+                    _preview_download_controls(hit["doc_id"], hit["filename"], hit["page_number"], widget_id, result_ordinal=result_index + 1)
                     _favorite_toggle(hit["doc_id"], hit["filename"], hit["page_number"], widget_id)
     else:
         browse_category = category_label if category_label != "All categories" else None
@@ -1333,6 +1596,104 @@ if view == "search":
                         "a brief network hiccup talking to Google Drive -- try again."
                     )
                 else:
+                    st.rerun()
+ 
+        # -----------------------------------------------------------------
+        # Rebuild search index from Drive
+        #
+        # doc_id is just "whatever id the file happens to have in the
+        # store" (see drive_store.py / search_engine.py) -- there's no
+        # separate stable identifier. That's normally fine, but it breaks
+        # the moment the *same files* end up with *different* Drive file
+        # ids than the ones already baked into search_index.pkl: every
+        # preview/download for those documents then fails with a 404
+        # "File not found" that looks alarming but has nothing to do with
+        # permissions -- the id the index is asking for simply doesn't
+        # exist any more.
+        #
+        # This happens whenever the library folder is re-uploaded to a new
+        # Drive location instead of truly moved -- e.g. a folder move into
+        # a Shared Drive failing and getting worked around with a
+        # drag-and-drop upload instead, which Drive treats as a brand new
+        # set of files with brand new ids, even though the content and
+        # filenames are identical. The one-at-a-time uploader above only
+        # ever *adds* documents, so there's no normal path that repairs
+        # this -- the button below rescans whatever folder drive_folder_id
+        # currently points at, re-extracts text from every PDF found there
+        # right now, and replaces the whole index with fresh records (new
+        # ids included), carrying forward each file's existing category by
+        # matching on filename so re-tagging isn't lost.
+        st.markdown("---")
+        st.caption(
+            "📚 Previews or downloads failing with \"File not found\"? That means "
+            "the search index still points at old Google Drive file ids -- usually "
+            "because the library folder got re-uploaded somewhere new instead of "
+            "truly moved. Rebuilding below fixes it by re-scanning the current "
+            "folder from scratch."
+        )
+        if st.button("🔄 Rebuild search index from Drive", key="rebuild_index_btn"):
+            st.session_state.rebuild_index_requested = True
+            st.rerun()
+ 
+        if st.session_state.get("rebuild_index_requested"):
+            old_category_by_filename = {d["filename"]: d.get("category", "Uncategorized") for d in docs}
+            try:
+                drive_files = store.list_files()
+            except Exception as e:
+                st.session_state.rebuild_index_requested = False
+                st.error(f"Couldn't list files in Drive: {e}")
+            else:
+                pdf_files = [f for f in drive_files if f["name"].lower().endswith(".pdf")]
+                progress = st.progress(0.0, text=f"Rebuilding index -- 0 / {len(pdf_files)} files...")
+                new_records = []
+                failures = []
+                for i, f in enumerate(pdf_files):
+                    progress.progress(
+                        i / max(len(pdf_files), 1),
+                        text=f"Rebuilding index -- processing {f['name']} ({i + 1} / {len(pdf_files)})...",
+                    )
+                    try:
+                        import pymupdf as fitz
+ 
+                        data = store.download_bytes(f["id"])
+                        doc = fitz.open(stream=data, filetype="pdf")
+                        pages = [
+                            {"page_number": pi + 1, "text": p.get_text("text")}
+                            for pi, p in enumerate(doc)
+                        ]
+                        doc.close()
+                        chunks = chunk_pages(pages)
+                        category = old_category_by_filename.get(f["name"], "Uncategorized")
+                        for c in chunks:
+                            new_records.append({
+                                "doc_id": f["id"],
+                                "filename": f["name"],
+                                "page_number": c["page_number"],
+                                "text": c["text"],
+                                "category": category,
+                            })
+                    except Exception as e:
+                        failures.append((f["name"], str(e)))
+                progress.progress(1.0, text="Saving rebuilt index...")
+                try:
+                    index.replace_all(new_records)
+                except Exception as e:
+                    st.error(f"Rebuild failed while saving the new index: {e}. Try again.")
+                else:
+                    st.session_state.rebuild_index_requested = False
+                    succeeded = len(pdf_files) - len(failures)
+                    if failures:
+                        st.warning(
+                            f"Rebuilt {succeeded} / {len(pdf_files)} documents "
+                            f"({len(new_records)} pages indexed). These failed and were "
+                            "skipped -- try again for just these: "
+                            + ", ".join(f"{n} ({e})" for n, e in failures)
+                        )
+                    else:
+                        st.success(
+                            f"Rebuilt the index: {succeeded} documents, "
+                            f"{len(new_records)} pages indexed."
+                        )
                     st.rerun()
  
 elif view == "history":
@@ -1512,4 +1873,3 @@ elif view == "about":
             """
         )
  
-
