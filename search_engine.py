@@ -103,6 +103,31 @@ class SearchIndex:
                 raise
             self._rebuild()
  
+    def replace_all(self, records: list):
+        """Wholesale replacement of every record -- used by the "Rebuild
+        search index from Drive" maintenance tool (see app.py). That tool
+        exists because doc_id is just "whatever the file's id happens to
+        be in the store" (see the module docstring): if the whole library
+        folder is ever re-uploaded to a new Google Drive location instead
+        of actually moved -- which is exactly what happened when a folder
+        move into a Shared Drive failed and got worked around with a
+        drag-and-drop upload instead -- every file gets a brand new Drive
+        file id, but the already-saved index keeps pointing at the old
+        ones. Previews/downloads then fail with a 404 "File not found"
+        that has nothing to do with permissions. Rescanning the folder and
+        calling this with freshly-extracted records (new ids included)
+        is how that gets fixed, without needing to delete and re-upload
+        every PDF by hand through the one-at-a-time uploader."""
+        with self._lock:
+            previous_records = self.records
+            self.records = records
+            try:
+                self._save()
+            except Exception:
+                self.records = previous_records
+                raise
+            self._rebuild()
+ 
     def list_documents(self):
         with self._lock:
             seen = {}
@@ -194,4 +219,3 @@ class SearchIndex:
                 )
             return hits
  
-
