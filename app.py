@@ -573,7 +573,7 @@ _VOICE_HTML = """
   <button id="micBtn" style="padding:9px 18px;border-radius:999px;border:none;
     background:#2563EB;color:white;font-size:14px;font-weight:500;cursor:pointer;
     box-shadow:0 1px 3px rgba(37,99,235,0.4);">
-    🎤 マイクを許可する（最初の1回だけ）/ Enable microphone (first time only)
+    🎤 Enable microphone (first time only)
   </button>
   <div id="voiceStatus" style="margin-top:8px;font-size:13px;color:#6b7280;"></div>
 </div>
@@ -581,9 +581,9 @@ _VOICE_HTML = """
 const btn = document.getElementById('micBtn');
 const statusEl = document.getElementById('voiceStatus');
 const WAKE_WORD = 'guide';
-const LABEL_ENABLE = '🎤 マイクを許可する（最初の1回だけ）/ Enable microphone (first time only)';
-const LABEL_LISTENING = '⏸ 一時停止する / Pause listening';
-const LABEL_PAUSED = '▶ 再開する（「' + WAKE_WORD + '」で起動）/ Resume (say "' + WAKE_WORD + '" to activate)';
+const LABEL_ENABLE = '🎤 Enable microphone (first time only)';
+const LABEL_LISTENING = '⏸ Pause listening';
+const LABEL_PAUSED = '▶ Resume (say "' + WAKE_WORD + '" to activate)';
  
 // Finds the real search <input> in the parent page (see the big comment
 // above) and fills it in the same way a person typing would, then blurs
@@ -620,7 +620,7 @@ function speak(text) {
   try {
     if (!window.speechSynthesis) return;
     const utter = new SpeechSynthesisUtterance(text);
-    utter.lang = 'ja-JP';
+    utter.lang = 'en-US';
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(utter);
   } catch (err) { /* TTS unsupported here -- silently skip, mic still works */ }
@@ -681,10 +681,38 @@ if (!SR) {
     return t.slice(WAKE_WORD.length).replace(/^[\\s,.:;!-]+/, '').trim();
   }
  
+  // Set after a bare "guide" (nothing following it in that same
+  // utterance) -- continuous recognition segments speech into separate
+  // utterances on any natural pause, so "Guide... [breath]... HT300 fade
+  // stagger section" arrives as TWO utterances, not one. Without this,
+  // the second utterance doesn't start with the wake word and would
+  // silently be discarded as background noise, even though the person
+  // did everything right. While armed, the *next* utterance is taken as
+  // the command outright, wake word or not; it disarms itself after a
+  // few seconds so a stray sentence long after an old "guide" doesn't
+  // get mistaken for the command that never came.
+  let awaitingCommand = false;
+  let awaitingTimer = null;
+ 
+  function armAwaitingCommand() {
+    awaitingCommand = true;
+    clearTimeout(awaitingTimer);
+    awaitingTimer = setTimeout(() => { awaitingCommand = false; }, 8000);
+  }
+ 
   function handleUtterance(text) {
     const normalized = text.trim().toLowerCase().replace(/[.!?]+$/, '');
     if (STOP_WORDS.includes(normalized)) {
-      pauseRecognition('一時停止しました。 / Paused.');
+      awaitingCommand = false;
+      pauseRecognition('Paused.');
+      return;
+    }
+    if (awaitingCommand) {
+      awaitingCommand = false;
+      clearTimeout(awaitingTimer);
+      if (fillParentSearchBox(text)) {
+        statusEl.innerText = '✅ Searching for "' + text + '"';
+      }
       return;
     }
     const command = extractCommand(text);
@@ -696,13 +724,15 @@ if (!SR) {
       return;
     }
     if (!command) {
-      // Wake word said on its own, nothing after it.
-      statusEl.innerText = 'はい、どうぞ。 / Yes? Go ahead.';
-      speak('はい、どうぞ。');
+      // Wake word said on its own, nothing after it (yet) -- arm the
+      // follow-up window instead of assuming there's nothing more coming.
+      statusEl.innerText = 'Yes? Go ahead.';
+      speak('Yes, go ahead.');
+      armAwaitingCommand();
       return;
     }
     if (fillParentSearchBox(command)) {
-      statusEl.innerText = '✅ "' + command + '" を検索中… / Searching for "' + command + '"';
+      statusEl.innerText = '✅ Searching for "' + command + '"';
     }
   }
  
@@ -714,10 +744,10 @@ if (!SR) {
   recog.onerror = (e) => {
     const messages = {
       'no-speech': null,  // expected during normal pauses in continuous mode -- not a real error
-      'not-allowed': 'マイクが許可されていません。ブラウザの設定で許可してください。 / Microphone access blocked.',
-      'service-not-allowed': 'マイクが許可されていません。ブラウザの設定で許可してください。 / Microphone access blocked.',
-      'audio-capture': 'マイクが見つかりません。 / No microphone found.',
-      'network': 'ネットワークエラーが発生しました。 / Network error during speech recognition.'
+      'not-allowed': 'Microphone access blocked. Allow it in the browser site settings.',
+      'service-not-allowed': 'Microphone access blocked. Allow it in the browser site settings.',
+      'audio-capture': 'No microphone found.',
+      'network': 'Network error during speech recognition.'
     };
     const msg = messages[e.error];
     if (msg) {
@@ -756,9 +786,9 @@ if (!SR) {
  
   btn.onclick = () => {
     if (listening || wantListening) {
-      pauseRecognition('一時停止しました。 / Paused.');
+      pauseRecognition('Paused.');
     } else {
-      statusEl.innerText = '開始しています… / Starting…';
+      statusEl.innerText = 'Starting…';
       startRecognition();
     }
   };
@@ -774,7 +804,7 @@ if (!SR) {
   try {
     navigator.permissions.query({ name: 'microphone' }).then((status) => {
       if (status.state === 'granted') {
-        statusEl.innerText = '「' + WAKE_WORD + '」と話しかけてください / Say "' + WAKE_WORD + '" to activate';
+        statusEl.innerText = 'Say "' + WAKE_WORD + '" to activate';
         startRecognition();
       }
     }).catch(() => {});
@@ -1086,17 +1116,19 @@ if view == "search":
         # Invisible marker the hands-free voice script polls for (it can't
         # listen for "the Python script re-ran", so it watches this
         # instead): a token that changes on every search, plus a
-        # ready-to-speak Japanese summary of what was found. See the big
-        # comment above _VOICE_HTML for why this has to be poll-based.
+        # ready-to-speak summary of what was found. See the big comment
+        # above _VOICE_HTML for why this has to be poll-based.
         st.session_state.voice_result_seq = st.session_state.get("voice_result_seq", 0) + 1
         if hits:
             top = hits[0]
+            doc_word = "document" if doc_count == 1 else "documents"
+            page_word = "page" if len(hits) == 1 else "pages"
             voice_say = (
-                f"{doc_count}件の資料で、合計{len(hits)}件のページが見つかりました。"
-                f"一番上の結果は、{top['filename']}、{top['page_number']}ページです。"
+                f"Found {len(hits)} {page_word} across {doc_count} {doc_word}. "
+                f"Top result: {top['filename']}, page {top['page_number']}."
             )
         else:
-            voice_say = "一致するページが見つかりませんでした。別のキーワードでもう一度お試しください。"
+            voice_say = "No matching pages found. Try a different search term."
         st.markdown(
             f"<div id='voiceResultMarker' "
             f"data-token='{st.session_state.voice_result_seq}' "
