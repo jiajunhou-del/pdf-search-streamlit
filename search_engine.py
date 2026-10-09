@@ -18,6 +18,10 @@ from sklearn.metrics.pairwise import cosine_similarity
  
 from query_expand import expand_query
  
+# Startup progress marker for the Streamlit Cloud log (prints once per server
+# process) -- see get_index() in app.py for why.
+print("[startup] numpy + scikit-learn loaded", flush=True)
+ 
  
 class SearchIndex:
     def __init__(self, store):
