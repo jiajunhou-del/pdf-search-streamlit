@@ -1,54 +1,344 @@
 """
-Extracts text from a PDF, page by page, and splits each page into
-overlapping chunks small enough to embed well while keeping track of
-which page (and roughly where on the page) each chunk came from.
+File storage backend for the search app.
+ 
+Real deployments store everything in a shared Google Drive folder, so the
+PDF library lives in your company's Drive (not on Streamlit's disk, which
+is wiped whenever the app sleeps or redeploys) -- that's what makes this
+safe to run on Streamlit Community Cloud.
+ 
+Two modes, chosen automatically:
+ 
+  - Google Drive mode: used when st.secrets["gcp_oauth"] and
+    st.secrets["drive_folder_id"] are set (see README.md for how to create
+    these). This uses a real Google account's own Drive (via OAuth, the
+    same kind of "Sign in with Google" flow you've seen elsewhere) rather
+    than a service account -- that's the deliberate choice here, because
+    an organization's Workspace admin can block sharing files with an
+    outside/robot account (a service account's email looks external to
+    Workspace), which a normal person's own Drive access doesn't run into.
+    One person (whoever runs get_refresh_token.py once, see README.md)
+    authorizes the app to act as them; after that, the app always acts as
+    that person's Drive identity -- nobody else needs to log in to use
+    the search tool itself.
+ 
+  - Local mode: used when those secrets are absent (e.g. while developing
+    on your own machine without a Google Cloud project yet). Files are
+    just kept in ./local_drive_cache/ instead. Everything else in the app
+    behaves identically, so you can build/test the whole thing locally
+    before wiring up real Drive credentials.
+ 
+Either way, the search index itself (search_index.pkl -- the extracted
+text chunks with page numbers) is stored as one file *inside the same
+folder*. That's the key trick that keeps cold starts fast even with
+hundreds of PDFs: on startup the app downloads that one small index file,
+not every PDF. Full PDF bytes / page thumbnails are only fetched lazily,
+the first time something actually needs to view that page or file, and
+cached locally for the life of the running instance.
+ 
+A document's doc_id (used throughout search_engine.py/app.py) is its
+FILENAME, in both modes -- not a raw Google Drive file id. This used to
+be "whatever id the file has in the store" (the Drive file id in Drive
+mode), which seemed natural since that's a real, unique, stable-looking
+identifier Drive hands you for free. In practice, for at least one real
+folder, it was not stable: a file already proven to exist and download
+fine (e.g. right after the "Rebuild search index" tool in app.py just
+finished downloading it) was later found to 404 with "File not found" --
+same name, same content, but a different underlying id -- most likely
+because other people/computers also have this Shared Drive mounted via
+Google Drive for Desktop and were simultaneously reorganizing it, which
+can replace a file (new id) rather than edit it in place, with nothing
+about that visible from the Drive UI a person actually looks at. A cached
+id can silently go stale at any moment with no warning and no action by
+this app. Resolving by filename *at the moment of use* instead of trusting
+a ever-so-slightly-stale cached id -- see DriveStore.resolve_doc_id below,
+called from app.py's _download_bytes -- means a renamed-under-the-hood
+file keeps working without needing anyone to notice and click "Rebuild".
+The trade-off, accepted deliberately: two files with the exact same name
+in the configured folder become ambiguous (whichever one Drive's API
+happens to list first wins) -- acceptable here since the actual manuals
+have distinct names; it's only ever the generated search_index.pkl itself
+that has been observed to collide, and that one is looked up separately
+by a fixed name, not through doc_id.
 """
-import re
-import pymupdf as fitz  # PyMuPDF (the "fitz" module name is deprecated)
+import io
+import os
  
-# Startup progress marker for the Streamlit Cloud log (module-level, so it
-# prints once per server process) -- see get_index() in app.py for why.
-print("[startup] pymupdf loaded", flush=True)
+try:
+    import streamlit as st
+except ImportError:  # pragma: no cover - only relevant when unit testing
+    st = None
  
- 
-def _clean(text: str) -> str:
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
- 
- 
-def extract_pages(pdf_path: str):
-    """Returns a list of {page_number, text} for every page (1-indexed)."""
-    doc = fitz.open(pdf_path)
-    pages = []
-    for i, page in enumerate(doc):
-        text = _clean(page.get_text("text"))
-        pages.append({"page_number": i + 1, "text": text})
-    doc.close()
-    return pages
+INDEX_FILENAME = "search_index.pkl"
+LOCAL_CACHE_DIR = os.path.join(os.path.dirname(__file__), "local_drive_cache")
+# Per-user History/Favorites files (see user_data.py) share this prefix so
+# list_files() can filter them out of the Document library alongside the
+# search index -- neither is a manual someone uploaded.
+USER_DATA_PREFIX = "userdata__"
  
  
-def chunk_pages(pages, chunk_size=800, overlap=150):
+def _has_drive_secrets() -> bool:
+    if st is None:
+        return False
+    try:
+        return "gcp_oauth" in st.secrets and "drive_folder_id" in st.secrets
+    except Exception:
+        return False
+ 
+ 
+class LocalStore:
+    """Fallback used when no Google Drive credentials are configured."""
+ 
+    mode = "local"
+ 
+    def __init__(self):
+        os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
+ 
+    def _path(self, name):
+        return os.path.join(LOCAL_CACHE_DIR, name)
+ 
+    def resolve_doc_id(self, doc_id: str) -> str:
+        """doc_id already IS the filename in local mode -- nothing to look
+        up. Exists so app.py can call this uniformly regardless of which
+        store is active; see the module docstring for why it matters in
+        Drive mode."""
+        return doc_id
+ 
+    def list_files(self):
+        out = []
+        for name in os.listdir(LOCAL_CACHE_DIR):
+            if name == INDEX_FILENAME or name.startswith(USER_DATA_PREFIX):
+                continue
+            out.append({"id": name, "name": name})
+        return out
+ 
+    def upload_bytes(self, filename: str, data: bytes) -> str:
+        """Returns the file's id (here, just its filename)."""
+        with open(self._path(filename), "wb") as f:
+            f.write(data)
+        return filename
+ 
+    def download_bytes(self, file_id: str) -> bytes:
+        with open(self._path(file_id), "rb") as f:
+            return f.read()
+ 
+    def download_to_file(self, file_id: str, dest_path: str):
+        """Same as download_bytes, but writes to disk instead of returning
+        the whole file in memory -- see DriveStore.download_to_file."""
+        import shutil
+        shutil.copyfile(self._path(file_id), dest_path)
+ 
+    def delete_file(self, file_id: str):
+        path = self._path(file_id)
+        if os.path.exists(path):
+            os.remove(path)
+ 
+    def load_index_bytes(self):
+        return self.load_named_bytes(INDEX_FILENAME)
+ 
+    def save_index_bytes(self, data: bytes):
+        self.save_named_bytes(INDEX_FILENAME, data)
+ 
+    def load_named_bytes(self, name: str):
+        """Generic single-file read/write, reused for the search index and
+        for the small per-user History/Favorites JSON blobs (user_data.py)
+        -- both are just "one named file in the same folder", so there's no
+        need for a separate storage mechanism."""
+        path = self._path(name)
+        if not os.path.exists(path):
+            return None
+        with open(path, "rb") as f:
+            return f.read()
+ 
+    def save_named_bytes(self, name: str, data: bytes, mimetype: str = None):
+        with open(self._path(name), "wb") as f:
+            f.write(data)
+ 
+ 
+class DriveStore:
     """
-    Splits each page's text into overlapping chunks (by characters).
-    Keeping chunks page-scoped means every chunk maps to exactly one
-    page number, which is what lets search results cite a page.
+    Real Google Drive-backed storage, scoped to one folder in the Drive of
+    whichever person ran get_refresh_token.py once (see README.md). Uses
+    that person's own stored OAuth refresh token rather than a service
+    account, so nothing needs to be "shared with an external account" --
+    the app is just acting as that person, the same as if they were
+    clicking around Drive themselves.
     """
-    chunks = []
-    for page in pages:
-        text = page["text"]
-        if not text:
-            continue
-        if len(text) <= chunk_size:
-            chunks.append({"page_number": page["page_number"], "text": text})
-            continue
-        start = 0
-        while start < len(text):
-            end = min(start + chunk_size, len(text))
-            chunk_text = text[start:end]
-            chunks.append({"page_number": page["page_number"], "text": chunk_text})
-            if end == len(text):
-                break
-            start = end - overlap
-    return chunks
+ 
+    mode = "drive"
+ 
+    def __init__(self):
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+ 
+        oauth = st.secrets["gcp_oauth"]
+        self.folder_id = st.secrets["drive_folder_id"]
+        creds = Credentials(
+            token=None,
+            refresh_token=oauth["refresh_token"],
+            client_id=oauth["client_id"],
+            client_secret=oauth["client_secret"],
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        self.service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        self._index_file_id_cache = None
+ 
+    # Every .list()/.create()/.get_media()/.update()/.delete() call below
+    # also passes supportsAllDrives=True (and, for .list(), also
+    # includeItemsFromAllDrives=True). Without these, the Drive API quietly
+    # assumes folder_id lives in someone's My Drive: a plain files().list()
+    # scoped to a folder that's actually inside a Shared Drive just comes
+    # back empty (no error -- it looks like "the folder has no files"),
+    # and files().create()/update()/delete() targeting a Shared Drive
+    # folder fail outright. Needed as soon as drive_folder_id points into a
+    # Shared Drive (共有ドライブ) instead of someone's personal My Drive.
+    #
+    # Every .execute()/.next_chunk() call below passes num_retries=3.
+    # Without it, googleapiclient's default is 0 retries -- so a single
+    # transient network hiccup talking to Google's servers (observed in
+    # production as "SSLError: [SSL: RECORD_LAYER_FAILURE] record layer
+    # failure", a one-off blip rather than anything actually wrong with
+    # the credentials or the request) was propagating straight up as an
+    # uncaught exception and crashing the whole app with Streamlit's
+    # generic "Oh no. Error running app" page. num_retries makes
+    # googleapiclient retry that kind of transient failure internally
+    # with exponential backoff before giving up.
+ 
+    def resolve_doc_id(self, doc_id: str) -> str:
+        """Looks up the CURRENT real Drive file id for a document, by
+        filename (doc_id), instead of trusting an id cached from an
+        earlier search index build -- see the module docstring for why
+        that matters. Raises FileNotFoundError (with a message naming the
+        file) if nothing by that name exists in the folder right now, so
+        callers' existing `except Exception as e: st.error(...)` handling
+        around preview/download keeps working unchanged."""
+        file_id = self._find(doc_id)
+        if not file_id:
+            raise FileNotFoundError(
+                f'No file named "{doc_id}" found in the configured Drive folder '
+                "right now -- it may have been deleted, renamed, or moved. If you "
+                "can see it in Drive under that exact name, try \"Rebuild search "
+                "index from Drive\" in the Document library section below."
+            )
+        return file_id
+ 
+    def _find(self, name: str):
+        q = (
+            f"'{self.folder_id}' in parents and name = '{name}' "
+            "and trashed = false"
+        )
+        res = self.service.files().list(
+            q=q, fields="files(id, name)", spaces="drive",
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute(num_retries=3)
+        files = res.get("files", [])
+        return files[0]["id"] if files else None
+ 
+    def list_files(self):
+        q = f"'{self.folder_id}' in parents and trashed = false"
+        res = self.service.files().list(
+            q=q, fields="files(id, name)", spaces="drive", pageSize=1000,
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute(num_retries=3)
+        return [
+            f for f in res.get("files", [])
+            if f["name"] != INDEX_FILENAME
+            and not f["name"].startswith(USER_DATA_PREFIX)
+        ]
+ 
+    def upload_bytes(self, filename: str, data: bytes) -> str:
+        from googleapiclient.http import MediaIoBaseUpload
+ 
+        media = MediaIoBaseUpload(io.BytesIO(data), mimetype="application/pdf")
+        # Re-uploading a manual that's already in the folder updates that
+        # same Drive file in place instead of creating a second file with
+        # the same name next to it. Drive happily allows duplicate names in
+        # one folder, and each upload used to create one more copy -- see
+        # SearchIndex.add_document for how that played out in production.
+        existing_id = self._find(filename)
+        if existing_id:
+            self.service.files().update(
+                fileId=existing_id, media_body=media, supportsAllDrives=True,
+            ).execute(num_retries=3)
+            return existing_id
+        meta = {"name": filename, "parents": [self.folder_id]}
+        created = self.service.files().create(
+            body=meta, media_body=media, fields="id", supportsAllDrives=True,
+        ).execute(num_retries=3)
+        return created["id"]
+ 
+    def download_bytes(self, file_id: str) -> bytes:
+        from googleapiclient.http import MediaIoBaseDownload
+ 
+        request = self.service.files().get_media(
+            fileId=file_id, supportsAllDrives=True,
+        )
+        buf = io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk(num_retries=3)
+        return buf.getvalue()
+ 
+    def download_to_file(self, file_id: str, dest_path: str):
+        """Streams a file straight to disk in chunks. Used by the "Rebuild
+        search index" pass, which has to read every manual in the library
+        (30-120MB each) on an instance with ~1GB of RAM: holding each one
+        fully in memory (download_bytes) on top of PyMuPDF's own working
+        set measured ~990MB peak for just three 110MB manuals -- right at
+        the limit. Reading from a temp file lets PyMuPDF page through it
+        from disk instead."""
+        from googleapiclient.http import MediaIoBaseDownload
+ 
+        request = self.service.files().get_media(
+            fileId=file_id, supportsAllDrives=True,
+        )
+        with open(dest_path, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk(num_retries=3)
+ 
+    def delete_file(self, file_id: str):
+        self.service.files().delete(
+            fileId=file_id, supportsAllDrives=True,
+        ).execute(num_retries=3)
+ 
+    def load_index_bytes(self):
+        return self.load_named_bytes(INDEX_FILENAME)
+ 
+    def save_index_bytes(self, data: bytes):
+        self.save_named_bytes(INDEX_FILENAME, data)
+ 
+    def load_named_bytes(self, name: str):
+        """Generic single-file read/write, reused for the search index and
+        for the small per-user History/Favorites JSON blobs (user_data.py)
+        -- both are just "one named file in the same folder", so there's no
+        need for a separate storage mechanism."""
+        file_id = self._find(name)
+        if not file_id:
+            return None
+        return self.download_bytes(file_id)
+ 
+    def save_named_bytes(self, name: str, data: bytes, mimetype: str = "application/octet-stream"):
+        from googleapiclient.http import MediaIoBaseUpload
+ 
+        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype)
+        existing_id = self._find(name)
+        if existing_id:
+            self.service.files().update(
+                fileId=existing_id, media_body=media, supportsAllDrives=True,
+            ).execute(num_retries=3)
+        else:
+            meta = {"name": name, "parents": [self.folder_id]}
+            self.service.files().create(
+                body=meta, media_body=media, supportsAllDrives=True,
+            ).execute(num_retries=3)
+ 
+ 
+def get_store():
+    """Picks Drive mode if configured, otherwise falls back to local disk."""
+    if _has_drive_secrets():
+        return DriveStore()
+    return LocalStore()
  
