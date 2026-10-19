@@ -1009,16 +1009,29 @@ function normalizeForEcho(s) {
 function ttsActive() {
   return Date.now() < ttsMuteUntil || !!(window.speechSynthesis && window.speechSynthesis.speaking);
 }
+// Echo = most of the heard words appear in what was just read aloud. Plain
+// muting during speech also swallowed the engineer's own question whenever
+// they started talking over "Yes, go ahead.", so only echo-like text is
+// dropped; anything else is treated as the person talking (and cuts the
+// read-aloud short).
+function looksLikeEcho(text) {
+  if (!(ttsActive() || Date.now() < echoUntil) || !lastSpoken) return false;
+  const heard = normalizeForEcho(text).split(' ').filter(Boolean);
+  if (!heard.length) return false;
+  const said = new Set(lastSpoken.split(' '));
+  const hits = heard.filter((w) => said.has(w)).length;
+  return hits / heard.length >= 0.6;
+}
 function isOwnVoice(text) {
   const heard = normalizeForEcho(text);
   if (STOP_WORDS.includes(heard)) return false;
-  if (ttsActive()) {
-    statusEl.innerText = '🔇 (ignored while reading aloud: ' + text + ')';
+  if (looksLikeEcho(text)) {
+    statusEl.innerText = '🔇 (ignored own voice: ' + text + ')';
     return true;
   }
-  if (Date.now() < echoUntil && heard.length >= 6 && lastSpoken.indexOf(heard) !== -1) {
-    statusEl.innerText = '🔇 (ignored echo: ' + text + ')';
-    return true;
+  if (ttsActive()) {
+    try { window.speechSynthesis.cancel(); } catch (err) {}
+    ttsMuteUntil = 0;
   }
   return false;
 }
@@ -1055,11 +1068,21 @@ if (!SR) {
   let listening = false;       // whether recog.start() is currently active
   let resultCursor = 0;        // index into e.results already handled this session
   let lastResultToken = null;  // last #voiceResultMarker token we've already read aloud
+  // Settle timer: Chrome does not always mark a result "final" after the
+  // speaker stops -- in testing a lone "Guide" could sit as an interim
+  // result indefinitely, so nothing ever happened. If the interim text
+  // stops changing for SETTLE_MS, act on it as if it were final, and
+  // remember what was consumed so the later real final (or a continuation
+  // of the same result, e.g. "guide ... HT300 paper jam") isn't handled twice.
+  const SETTLE_MS = 1300;
+  let consumed = {};           // result index -> transcript already acted on
+  let settleTimer = null;
 
   function startRecognition() {
     wantListening = true;
     if (listening) return;
     resultCursor = 0;
+    consumed = {};
     try {
       recog.start();
     } catch (err) {
@@ -1136,8 +1159,16 @@ if (!SR) {
     if (sessionActive) {
       // Already in a session -- no need to repeat the wake word, this
       // utterance IS the query (or an action command -- see routeCommand).
+      // If the person says the wake word again anyway, strip it rather
+      // than searching for "guide ...".
       armSessionTimeout();
-      routeCommand(text);
+      const again = extractCommand(text);
+      if (again === '') {
+        statusEl.innerText = 'Listening -- go ahead (no need to say "' + WAKE_WORD + '" again).';
+        speak('Yes, go ahead.');
+        return;
+      }
+      routeCommand(again !== null ? again : text);
       return;
     }
     const command = extractCommand(text);
@@ -1193,19 +1224,39 @@ if (!SR) {
       btn.innerText = LABEL_PAUSED;
     }
   };
+  // Part of a result's transcript not yet acted on (see SETTLE_MS above).
+  function takeNew(i, transcript) {
+    const t = transcript.trim();
+    const done = consumed[i];
+    if (!done) return t;
+    const nd = normalizeForEcho(done), nt = normalizeForEcho(t);
+    if (nt === nd) return '';
+    if (nt.startsWith(nd + ' ')) return t.split(/\\s+/).slice(nd.split(' ').length).join(' ');
+    return t;
+  }
+
   recog.onresult = (e) => {
-    let interim = '';
+    let pending = null;
     for (let i = resultCursor; i < e.results.length; i++) {
       const r = e.results[i];
+      const fresh = takeNew(i, r[0].transcript);
       if (r.isFinal) {
         resultCursor = i + 1;
-        const text = r[0].transcript.trim();
-        if (text && !isOwnVoice(text)) handleUtterance(text);
-      } else {
-        interim += r[0].transcript;
+        delete consumed[i];
+        if (fresh && !isOwnVoice(fresh)) handleUtterance(fresh);
+      } else if (fresh) {
+        pending = { i: i, full: r[0].transcript.trim(), text: fresh };
       }
     }
-    if (interim && !ttsActive()) statusEl.innerText = '🎙️ ' + interim;
+    clearTimeout(settleTimer);
+    if (pending) {
+      if (!looksLikeEcho(pending.text)) statusEl.innerText = '🎙️ ' + pending.text;
+      const p = pending;
+      settleTimer = setTimeout(() => {
+        consumed[p.i] = p.full;
+        if (!isOwnVoice(p.text)) handleUtterance(p.text);
+      }, SETTLE_MS);
+    }
   };
 
   btn.onclick = () => {
