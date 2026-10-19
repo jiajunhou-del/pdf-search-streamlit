@@ -1,6 +1,6 @@
 """
 Streamlit version of the PDF technical-manual search tool.
- 
+
 Why this exists alongside the original FastAPI+HTML version: deploying
 this on Streamlit Community Cloud gives every user a real, trusted HTTPS
 address automatically (no self-signed certificate, no dependence on one
@@ -9,7 +9,7 @@ problems that kept coming up with the original self-hosted setup. The
 PDF library itself is *not* stored on Streamlit's disk (which is wiped
 whenever the app sleeps or is redeployed); see drive_store.py for how it
 is kept in a shared Google Drive folder instead.
- 
+
 Run locally with:   streamlit run app.py
 Deploy: push this folder to a GitHub repo and connect it on
 share.streamlit.io -- see README.md for the full checklist (Google Drive
@@ -23,16 +23,16 @@ import tempfile
 import threading
 import time
 from collections import Counter
- 
+
 import streamlit as st
- 
+
 from drive_store import get_store
 from pdf_processor import extract_pages, chunk_pages
 from search_engine import SearchIndex
 import user_data
- 
+
 st.set_page_config(page_title="Technical Manual Search", page_icon="🔧", layout="wide")
- 
+
 # Fixed set of manual categories. Each maps to an icon + accent color used
 # for the "Popular search categories" cards on the Search home view, and
 # doubles as the choice list offered at upload time and in the category
@@ -50,7 +50,7 @@ CATEGORY_META = {
     "Installation": {"icon": "🔗", "bg": "#EAF7F8", "fg": "#1F7A8C", "sub": "Setup & connection"},
 }
 CATEGORY_NAMES = list(CATEGORY_META.keys())
- 
+
 # ---------------------------------------------------------------------------
 # Look and feel. The color palette itself lives in .streamlit/config.toml
 # (Streamlit's own [theme] section -- the supported way to theme buttons,
@@ -64,7 +64,7 @@ st.markdown(
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif; }
- 
+
     .stButton > button, .stDownloadButton > button {
         border-radius: 8px;
         font-weight: 500;
@@ -79,7 +79,7 @@ st.markdown(
     div[data-testid="stVerticalBlockBorderWrapper"] {
         border-radius: 12px !important;
     }
- 
+
     /* Sidebar navigation: plain st.button per item, restyled to read as a
        left-aligned nav list rather than a row of centered buttons -- the
        "selected" item uses Streamlit's own primary-button styling (see
@@ -105,7 +105,7 @@ st.markdown(
         color: #2563EB;
         font-weight: 600;
     }
- 
+
     /* Category cards ("Popular search categories"): the colored look comes
        from a markdown block rendered above a button, inside each card's
        own st.container(key=f"catcard_{name}") -- that key gives
@@ -145,7 +145,7 @@ st.markdown(
         padding: 0;
         border: none;
     }
- 
+
     /* Sidebar: switched from plain white to a dark "instrument panel" look
        -- a white sidebar on a near-white main background (per feedback)
        didn't read as a separate area at all. Dark navy + a blue accent
@@ -196,8 +196,8 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # Shared index: one instance for the whole running app (all users share the
 # same library), backed by whatever store.load_index_bytes() returns -- so
@@ -218,8 +218,8 @@ def get_index():
     idx = SearchIndex(store)
     print(f"[startup] search index ready: {len(idx.records)} chunks ({time.time() - t0:.1f}s)", flush=True)
     return idx
- 
- 
+
+
 index = get_index()
 store = index.store
 # viewer_email is resolved once the sidebar (which asks "who are you?") has
@@ -227,8 +227,8 @@ store = index.store
 # reference it as a module-level name (Python looks up globals at call
 # time, not at def time) don't error before that point.
 viewer_email = None
- 
- 
+
+
 # Whole manuals are cached on local DISK, not in memory.
 #
 # Community Cloud's free tier caps this whole process at ~1GB RAM, and the
@@ -250,15 +250,15 @@ viewer_email = None
 _PDF_CACHE_DIR = os.path.join(tempfile.gettempdir(), "manual_pdf_cache")
 _PDF_CACHE_MAX_FILES = 8
 _PDF_CACHE_TTL_SECONDS = 3600
- 
- 
+
+
 @st.cache_resource
 def _shared_locks():
     """Locks that must be shared by every session/rerun. (A plain
     module-level threading.Lock() in this file would be re-created on every
     Streamlit rerun, since the whole script re-executes -- so it would never
     actually be shared.)
- 
+
     "fitz": PyMuPDF is documented as NOT thread-safe, and Streamlit runs
     each browser session's script in its own thread -- two people (or one
     person's overlapping reruns, which hands-free voice mode makes much more
@@ -270,12 +270,12 @@ def _shared_locks():
     this isn't proven to be *that* crash's cause -- but serializing every
     PyMuPDF call is cheap (a page render takes milliseconds) and rules out
     a whole class of crash that otherwise can't be guarded against at all.
- 
+
     "per_doc": one lock per manual, so two sessions asking for the same
     uncached manual download it once, not twice in parallel."""
     return {"fitz": threading.Lock(), "guard": threading.Lock(), "per_doc": {}}
- 
- 
+
+
 def _local_pdf_path(store, doc_id: str) -> str:
     """Path to an up-to-date local copy of this manual, downloading it to
     disk first if needed. doc_id is a filename (see drive_store.py's module
@@ -299,8 +299,8 @@ def _local_pdf_path(store, doc_id: str) -> str:
                 os.remove(tmp_path)
     _evict_old_cached_pdfs(keep=path)
     return path
- 
- 
+
+
 def _evict_old_cached_pdfs(keep: str):
     try:
         cached = [
@@ -313,16 +313,16 @@ def _evict_old_cached_pdfs(keep: str):
                 os.remove(old)  # safe even if another thread has it open (Linux)
     except OSError:
         pass
- 
- 
+
+
 def _download_bytes(_store, doc_id: str) -> bytes:
     """Whole-file bytes, only for the explicit "Save PDF" button (which has
     to hand the browser the whole file anyway). Read from the disk cache,
     deliberately NOT memoized in memory -- see the comment above."""
     with open(_local_pdf_path(_store, doc_id), "rb") as fh:
         return fh.read()
- 
- 
+
+
 def _release_native_memory():
     """Hands memory freed by PyMuPDF back to the OS. Without this, measured
     on a real 110MB manual: RSS stays ~195MB after the document is closed
@@ -342,12 +342,12 @@ def _release_native_memory():
         ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:
         pass
- 
- 
+
+
 @st.cache_data(show_spinner=False, max_entries=50, ttl=3600)
 def _render_thumbnail(_store, file_id: str, page_number: int) -> bytes:
     import pymupdf as fitz
- 
+
     path = _local_pdf_path(_store, file_id)
     with _shared_locks()["fitz"]:
         doc = fitz.open(path)
@@ -357,12 +357,12 @@ def _render_thumbnail(_store, file_id: str, page_number: int) -> bytes:
             return pix.tobytes("png")
         finally:
             doc.close()
- 
- 
+
+
 @st.cache_data(show_spinner=False, max_entries=50, ttl=3600)
 def _render_page_image(_store, file_id: str, page_number: int) -> bytes:
     """A larger, actually-readable render of one page.
- 
+
     The first version of "Preview this page" embedded the whole PDF as a
     base64 data: URI inside an iframe (st.components.v1.html) so the
     browser's own PDF viewer could jump to the right page. That worked
@@ -375,7 +375,7 @@ def _render_page_image(_store, file_id: str, page_number: int) -> bytes:
     content, never on how large or how many pages the source PDF has.
     """
     import pymupdf as fitz
- 
+
     path = _local_pdf_path(_store, file_id)
     with _shared_locks()["fitz"]:
         doc = fitz.open(path)
@@ -387,12 +387,12 @@ def _render_page_image(_store, file_id: str, page_number: int) -> bytes:
             return pix.tobytes("png")
         finally:
             doc.close()
- 
- 
+
+
 @st.cache_data(show_spinner=False, max_entries=25, ttl=3600)
 def _page_count(_store, file_id: str) -> int:
     import pymupdf as fitz
- 
+
     path = _local_pdf_path(_store, file_id)
     with _shared_locks()["fitz"]:
         doc = fitz.open(path)
@@ -400,8 +400,8 @@ def _page_count(_store, file_id: str) -> int:
             return doc.page_count
         finally:
             doc.close()
- 
- 
+
+
 def _highlight(snippet: str, terms: list) -> str:
     escaped = html.escape(snippet)
     terms = sorted({t for t in terms if len(t) > 1}, key=len, reverse=True)
@@ -409,8 +409,8 @@ def _highlight(snippet: str, terms: list) -> str:
         pattern = re.compile(r"(" + re.escape(html.escape(term)) + r")", re.IGNORECASE)
         escaped = pattern.sub(r"**\1**", escaped)
     return escaped
- 
- 
+
+
 def _category_badge_html(category: str) -> str:
     meta = CATEGORY_META.get(category)
     if not meta:
@@ -422,8 +422,8 @@ def _category_badge_html(category: str) -> str:
         f"<span style='background:{meta['bg']};color:{meta['fg']};padding:2px 10px;"
         f"border-radius:999px;font-size:12px;font-weight:600;'>{meta['icon']} {html.escape(category)}</span>"
     )
- 
- 
+
+
 def _scope_badge_html(scope_filename: str) -> str:
     """A plain blue pill for the document a search was narrowed to (the
     "Search within" dropdown), shown next to the category badge on a
@@ -436,13 +436,13 @@ def _scope_badge_html(scope_filename: str) -> str:
         f"<span style='background:#EFF6FF;color:#2563EB;padding:2px 10px;"
         f"border-radius:999px;font-size:12px;font-weight:600;'>{html.escape(name)}</span>"
     )
- 
- 
+
+
 def _render_history_row(entry: dict, key_prefix: str, index: int):
     """One card for a past search -- used by both the Search page's
     "Recent Searches" panel and the full "My History" list, so the two
     stay visually consistent.
- 
+
     Every piece of HTML built here is assembled as a *single-line* string
     (no multi-line triple-quoted blocks). That's not just style: when the
     query has no category and wasn't scoped to a document, `badges` is an
@@ -477,8 +477,8 @@ def _render_history_row(entry: dict, key_prefix: str, index: int):
         with col_btn:
             if st.button("Search again", key=f"{key_prefix}_{index}", use_container_width=True):
                 _goto_search(prefill_query=entry["query"])
- 
- 
+
+
 def _favorite_toggle(doc_id: str, filename: str, page_number: int, widget_id: str):
     """Renders a star button that adds/removes this page from the current
     viewer's Favorites. Without a name entered in the sidebar there's no
@@ -492,8 +492,8 @@ def _favorite_toggle(doc_id: str, filename: str, page_number: int, widget_id: st
     if st.button(label, key=f"fav_{widget_id}"):
         user_data.toggle_favorite(store, viewer_email, doc_id, filename, page_number)
         st.rerun()
- 
- 
+
+
 def _preview_download_controls(doc_id: str, filename: str, page_number: int, widget_id: str, result_ordinal: int = None):
     """The lazy 'fetch only once asked' Preview / Download control pair,
     shared by search results and the Favorites view. Two-step pattern:
@@ -501,7 +501,7 @@ def _preview_download_controls(doc_id: str, filename: str, page_number: int, wid
     rerun does the actual Drive fetch happen and the real widget appear --
     this is what keeps every displayed card from eagerly downloading its
     full PDF on every search (the original cause of the memory crash).
- 
+
     result_ordinal (search results only, not Favorites) renders an
     invisible marker div right before the buttons, carrying this card's
     1-based position in the results list as a data attribute. The
@@ -549,7 +549,7 @@ def _preview_download_controls(doc_id: str, filename: str, page_number: int, wid
             if st.button("⬇️ Download PDF", key=f"dlprep_{widget_id}"):
                 st.session_state[dl_ready_key] = True
                 st.rerun()
- 
+
     if st.session_state.get(pv_ready_key):
         # Tracks which page is currently shown in *this* preview,
         # separate from the page that actually matched the search, so
@@ -592,8 +592,8 @@ def _preview_download_controls(doc_id: str, filename: str, page_number: int, wid
                     st.session_state[pv_page_key] = total_pages
                     st.rerun()
             st.image(page_img, use_container_width=True)
- 
- 
+
+
 def _goto_search(prefill_query: str = None, prefill_category: str = None):
     """Jumps to the Search view with the query box and/or category filter
     pre-set -- used by Recent Searches, Favorites and category cards. Both
@@ -610,8 +610,8 @@ def _goto_search(prefill_query: str = None, prefill_category: str = None):
         st.session_state["prefill_category"] = prefill_category
         st.session_state.category_widget_key = st.session_state.get("category_widget_key", 0) + 1
     st.rerun()
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # Voice input: Streamlit has no built-in microphone widget, so this embeds
 # the same browser Web Speech API used in the original prototype. This needs
@@ -794,7 +794,7 @@ const WAKE_WORD = 'guide';
 const LABEL_ENABLE = '🎤 Enable microphone (first time only)';
 const LABEL_LISTENING = '⏸ Pause listening';
 const LABEL_PAUSED = '▶ Resume (say "' + WAKE_WORD + '" to activate)';
- 
+
 // Finds the real search <input> in the parent page (see the big comment
 // above) and fills it in the same way a person typing would, then blurs
 // it so Streamlit commits the new value. Falls back to just leaving the
@@ -822,7 +822,7 @@ function fillParentSearchBox(text) {
     return false;
   }
 }
- 
+
 // Picks which result a voice command applies to. Looks for a word form
 // ("second", "two") or a bare digit anywhere in the utterance; returns
 // null if none is found, so the caller can fall back to a sensible
@@ -847,7 +847,7 @@ function extractOrdinal(text) {
   }
   return null;
 }
- 
+
 // Remembers which result ordinal a page-nav command ("next page") should
 // act on when the utterance didn't name one -- almost always whichever
 // result the person most recently opened a preview for.
@@ -861,7 +861,7 @@ let lastPreviewedOrdinal = 1;
 // produces a "Save PDF" button at all) doesn't leave this checking forever.
 let pendingDownloadOrdinal = null;
 let pendingDownloadDeadline = 0;
- 
+
 // Finds every .voice-result-anchor marker Python renders just before each
 // search result's buttons (see _preview_download_controls), sorted into
 // document order. These exist purely so action commands can tell which
@@ -884,7 +884,7 @@ function getResultAnchors() {
     return [];
   }
 }
- 
+
 // Every button in the parent page, between the anchor for `ordinal` and
 // the anchor for the next ordinal (or the end of the document, for the
 // last result), whose visible text matches labelRegex. This is what lets
@@ -907,7 +907,7 @@ function buttonsForOrdinal(ordinal, labelRegex) {
     return [];
   }
 }
- 
+
 function previewResult(ordinal) {
   const openBtn = buttonsForOrdinal(ordinal, /preview this page/i);
   if (openBtn.length) {
@@ -927,7 +927,7 @@ function previewResult(ordinal) {
   statusEl.innerText = '⚠️ No result #' + ordinal + '.';
   speak('I could not find result ' + ordinal + '.');
 }
- 
+
 function downloadResult(ordinal) {
   // Not anchored/exact -- the real label has a leading icon ("⬇️ Download
   // PDF"), same lesson as pageNav's regexes above. Excludes "save pdf" so
@@ -949,7 +949,7 @@ function downloadResult(ordinal) {
   statusEl.innerText = '⚠️ No result #' + ordinal + '.';
   speak('I could not find result ' + ordinal + '.');
 }
- 
+
 function pageNav(ordinal, label, regex) {
   const btn = buttonsForOrdinal(ordinal, regex);
   if (btn.length && !btn[0].disabled) {
@@ -960,7 +960,7 @@ function pageNav(ordinal, label, regex) {
   }
   statusEl.innerText = '⚠️ No open preview to ' + label.toLowerCase() + ' for result ' + ordinal + ' -- say "preview" first.';
 }
- 
+
 // Tries each action command in turn; falls through to treating the whole
 // utterance as a search query if none match. Kept to a small fixed set of
 // keywords (not open-ended parsing) so it stays predictable -- see the big
@@ -971,7 +971,7 @@ function routeCommand(text) {
   const short = normalized.split(/\\s+/).length <= 6;
   const explicitOrdinal = extractOrdinal(normalized);
   const ordinal = explicitOrdinal || lastPreviewedOrdinal;
- 
+
   // Note: these match *anywhere* in the button's visible text, not
   // anchored to the start -- the real labels have a leading icon
   // ("⏮ First page", "◀ Previous page"), which an anchored /^.../ missed
@@ -983,27 +983,63 @@ function routeCommand(text) {
   if (short && (/\\bprevious\\s+page\\b/.test(normalized) || /\\bgo\\s+back\\b/.test(normalized) || normalized === 'back' || normalized === 'previous')) { pageNav(ordinal, 'Previous page', /previous page/i); return; }
   if (short && /\\bdownload\\b/.test(normalized)) { downloadResult(explicitOrdinal || 1); return; }
   if (short && (/\\bpreview\\b/.test(normalized) || (/\\bresult\\b/.test(normalized) && /^(open|show)\\b/.test(normalized)))) { previewResult(explicitOrdinal || 1); return; }
- 
+
   if (fillParentSearchBox(text)) {
     statusEl.innerText = '✅ Searching for "' + text + '"';
   }
 }
- 
+
 // Plain browser text-to-speech -- no permission prompt needed, unlike the
 // mic. .cancel() first so a fast-talking engineer's new sentence doesn't
 // queue up behind (and get read out after) an older one.
+//
+// Echo guard: on laptop speakers the mic hears this text-to-speech output,
+// and once a session is open every recognized utterance is treated as a
+// query -- so "Yes, go ahead." and the "Found 8 pages..." readback were
+// being searched for as if the engineer had said them (and each readback
+// then triggered another search). While speaking, and for a short tail
+// after, recognized speech is ignored (except stop words), and anything
+// that matches what was just said is ignored for a few seconds more.
+let ttsMuteUntil = 0;
+let lastSpoken = '';
+let echoUntil = 0;
+function normalizeForEcho(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(' ').filter(Boolean).join(' ');
+}
+function ttsActive() {
+  return Date.now() < ttsMuteUntil || !!(window.speechSynthesis && window.speechSynthesis.speaking);
+}
+function isOwnVoice(text) {
+  const heard = normalizeForEcho(text);
+  if (STOP_WORDS.includes(heard)) return false;
+  if (ttsActive()) {
+    statusEl.innerText = '🔇 (ignored while reading aloud: ' + text + ')';
+    return true;
+  }
+  if (Date.now() < echoUntil && heard.length >= 6 && lastSpoken.indexOf(heard) !== -1) {
+    statusEl.innerText = '🔇 (ignored echo: ' + text + ')';
+    return true;
+  }
+  return false;
+}
 function speak(text) {
+  lastSpoken = normalizeForEcho(text);
+  // Upper bound in case the browser never fires onend.
+  ttsMuteUntil = Date.now() + 1500 + text.length * 90;
+  echoUntil = ttsMuteUntil + 4000;
   try {
-    if (!window.speechSynthesis) return;
+    if (!window.speechSynthesis) { ttsMuteUntil = 0; return; }
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = 'en-US';
+    utter.onend = () => { ttsMuteUntil = Date.now() + 1000; echoUntil = Date.now() + 4000; };
+    utter.onerror = () => { ttsMuteUntil = Date.now() + 300; };
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(utter);
-  } catch (err) { /* TTS unsupported here -- silently skip, mic still works */ }
+  } catch (err) { ttsMuteUntil = 0; /* TTS unsupported here -- silently skip, mic still works */ }
 }
- 
+
 const STOP_WORDS = ['stop', 'exit', 'quit', 'cancel', 'stop listening', 'end'];
- 
+
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 if (!SR) {
   statusEl.innerText = 'Voice input needs Chrome/Edge (Web Speech API not available here).';
@@ -1014,12 +1050,12 @@ if (!SR) {
   recog.continuous = true;
   recog.interimResults = true;
   recog.maxAlternatives = 1;
- 
+
   let wantListening = false;   // true unless the person paused it (click or "stop")
   let listening = false;       // whether recog.start() is currently active
   let resultCursor = 0;        // index into e.results already handled this session
   let lastResultToken = null;  // last #voiceResultMarker token we've already read aloud
- 
+
   function startRecognition() {
     wantListening = true;
     if (listening) return;
@@ -1030,14 +1066,14 @@ if (!SR) {
       // "already started" races can happen right after a restart -- harmless.
     }
   }
- 
+
   function pauseRecognition(spokenMessage) {
     wantListening = false;
     statusEl.innerText = spokenMessage;
     speak(spokenMessage);
     try { recog.stop(); } catch (err) {}
   }
- 
+
   // The wake word has to be the *first* word of the utterance, not just
   // anywhere in the sentence -- tested against real sentences like
   // "please guide me through this" during development, which would
@@ -1054,7 +1090,7 @@ if (!SR) {
     if (nextChar && /[a-zA-Z]/.test(nextChar)) return null;
     return t.slice(WAKE_WORD.length).replace(/^[\\s,.:;!-]+/, '').trim();
   }
- 
+
   // Saying "guide" doesn't gate a single command -- it opens a session
   // where *every* following utterance is a query, exactly like clicking
   // "start" used to in the click-based hands-free mode, right up until
@@ -1071,17 +1107,17 @@ if (!SR) {
   let sessionActive = false;
   let sessionTimer = null;
   const SESSION_IDLE_MS = 120000;
- 
+
   function startSession() {
     sessionActive = true;
     armSessionTimeout();
   }
- 
+
   function endSession() {
     sessionActive = false;
     clearTimeout(sessionTimer);
   }
- 
+
   function armSessionTimeout() {
     clearTimeout(sessionTimer);
     sessionTimer = setTimeout(() => {
@@ -1089,7 +1125,7 @@ if (!SR) {
       statusEl.innerText = 'Session timed out -- say "' + WAKE_WORD + '" to start again.';
     }, SESSION_IDLE_MS);
   }
- 
+
   function handleUtterance(text) {
     const normalized = text.trim().toLowerCase().replace(/[.!?]+$/, '');
     if (STOP_WORDS.includes(normalized)) {
@@ -1123,7 +1159,7 @@ if (!SR) {
       speak('Yes, go ahead.');
     }
   }
- 
+
   recog.onstart = () => {
     listening = true;
     btn.classList.add('listening');
@@ -1164,14 +1200,14 @@ if (!SR) {
       if (r.isFinal) {
         resultCursor = i + 1;
         const text = r[0].transcript.trim();
-        if (text) handleUtterance(text);
+        if (text && !isOwnVoice(text)) handleUtterance(text);
       } else {
         interim += r[0].transcript;
       }
     }
-    if (interim) statusEl.innerText = '🎙️ ' + interim;
+    if (interim && !ttsActive()) statusEl.innerText = '🎙️ ' + interim;
   };
- 
+
   btn.onclick = () => {
     if (listening || wantListening) {
       pauseRecognition('Paused.');
@@ -1180,7 +1216,7 @@ if (!SR) {
       startRecognition();
     }
   };
- 
+
   // First-ever visit: the mic permission prompt can only ever appear
   // after a real click, so the button above is the entry point and stays
   // labelled as a one-time "enable" action until that first grant. Every
@@ -1197,7 +1233,7 @@ if (!SR) {
       }
     }).catch(() => {});
   } catch (err) { /* Permissions API unsupported -- first tap still works fine */ }
- 
+
   // Auto-readback: poll the parent page for a fresh search result, and
   // read the summary aloud -- see the big comment above for why this has
   // to be a poll rather than an event.
@@ -1212,7 +1248,7 @@ if (!SR) {
         if (say) speak(say);
       }
     } catch (err) { /* parent DOM not ready yet on first load -- ignore */ }
- 
+
     // Completes a voice-triggered download: "Download PDF" only arms the
     // fetch (see _preview_download_controls' two-step pattern) and the
     // real "Save PDF" button doesn't exist until Streamlit's next rerun
@@ -1235,13 +1271,13 @@ if (!SR) {
 }
 </script>
 """
- 
+
 # ---------------------------------------------------------------------------
 # Sidebar navigation
 # ---------------------------------------------------------------------------
 if "nav" not in st.session_state:
     st.session_state.nav = "search"
- 
+
 # The "Your name" identity (see below) also lives in the page's own URL as
 # ?viewer_name=..., so simply reloading this tab or reopening a bookmarked
 # link that already has it restores it with zero clicks -- st.query_params
@@ -1250,7 +1286,7 @@ if "nav" not in st.session_state:
 # browser sandbox permission involved here at all.
 if "viewer_name" not in st.session_state:
     st.session_state.viewer_name = st.query_params.get("viewer_name", "")
- 
+
 with st.sidebar:
     st.markdown(
         """
@@ -1278,7 +1314,7 @@ with st.sidebar:
         if st.button(label, key=f"nav_{key}", type="primary" if active else "secondary", use_container_width=True):
             st.session_state.nav = key
             st.rerun()
- 
+
     # Simple, no-setup identity for My History / Favorites: Streamlit
     # Community Cloud's viewer-email allowlist (which restricts who can
     # open this app) stopped exposing the visitor's verified email to the
@@ -1304,11 +1340,11 @@ with st.sidebar:
         st.caption(f"🔖 Bookmark this page to return as **{html.escape(st.session_state.viewer_name)}**.")
     elif "viewer_name" in st.query_params:
         del st.query_params["viewer_name"]
- 
+
 viewer_email = st.session_state.get("viewer_name") or None
- 
+
 docs = index.list_documents()
- 
+
 # ---------------------------------------------------------------------------
 # Top header (branded bar within the main content area)
 # ---------------------------------------------------------------------------
@@ -1318,7 +1354,7 @@ if viewer_email:
     user_badge = f"<div title='{html.escape(viewer_email)}' style='width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;'>{initials}</div>"
 else:
     user_badge = "<div style='font-size:13px;opacity:0.8;'>Guest</div>"
- 
+
 header_col1, header_col2 = st.columns([5, 1])
 with header_col1:
     st.markdown(
@@ -1359,12 +1395,12 @@ with header_col2:
     if st.button("❓ Help", key="help_btn", use_container_width=True):
         st.session_state.nav = "about"
         st.rerun()
- 
+
 # ---------------------------------------------------------------------------
 # Route to the selected view
 # ---------------------------------------------------------------------------
 view = st.session_state.nav
- 
+
 if view == "search":
     st.markdown(
         """
@@ -1379,17 +1415,17 @@ if view == "search":
         """,
         unsafe_allow_html=True,
     )
- 
+
     if "search_widget_key" not in st.session_state:
         st.session_state.search_widget_key = 0
     if "category_widget_key" not in st.session_state:
         st.session_state.category_widget_key = 0
- 
+
     if "prefill_query" in st.session_state:
         initial_query = st.session_state.pop("prefill_query")
     else:
         initial_query = ""
- 
+
     category_options = ["All categories"] + CATEGORY_NAMES
     if "prefill_category" in st.session_state:
         initial_category = st.session_state.pop("prefill_category")
@@ -1398,7 +1434,7 @@ if view == "search":
     default_cat_index = (
         category_options.index(initial_category) if initial_category in category_options else 0
     )
- 
+
     # Category comes before Document in both the layout and the code: which
     # documents even make sense to narrow to depends on the chosen category,
     # so the category has to be picked first -- picking "Service Manual"
@@ -1421,7 +1457,7 @@ if view == "search":
             label_visibility="collapsed",
             key=f"category_select_{st.session_state.category_widget_key}",
         )
- 
+
     if category_label != "All categories":
         docs_in_scope = [d for d in docs if d.get("category", "Uncategorized") == category_label]
     else:
@@ -1429,21 +1465,21 @@ if view == "search":
     doc_options = {"All documents": None}
     for d in docs_in_scope:
         doc_options[d["filename"]] = d["doc_id"]
- 
+
     with col_doc:
         scope_label = st.selectbox(
             "Search within", list(doc_options.keys()), label_visibility="collapsed"
         )
     with col_btn:
         st.button("🔍 Search", use_container_width=True)
- 
+
     # See the big comment above _VOICE_HTML for why this fills the search
     # box directly via same-origin DOM access instead of going through
     # Streamlit's own (currently broken, in this build) component-value
     # protocol -- the recognized text lands straight in the real <input>
     # above, so nothing further needs to happen here at all.
     st.components.v1.html(_VOICE_HTML, height=70)
- 
+
     # -----------------------------------------------------------------
     # Popular search categories
     # -----------------------------------------------------------------
@@ -1484,9 +1520,9 @@ if view == "search":
                     )
                     if st.button("Browse", key=f"catbtn_{cat_name}", use_container_width=True):
                         _goto_search(prefill_category=cat_name)
- 
+
     st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
- 
+
     # -----------------------------------------------------------------
     # Results / Recent Searches + Tips
     # -----------------------------------------------------------------
@@ -1502,13 +1538,13 @@ if view == "search":
                 "the search index and rebuild it fresh."
             )
             hits = []
- 
+
         # Distinct documents, not raw page hits -- "4 documents" reads more
         # usefully than "7 result(s)" when several hits are different pages
         # of the same manual. Used both for Recent Searches logging below
         # and for the hands-free voice readback (see _VOICE_HTML).
         doc_count = len({h["doc_id"] for h in hits})
- 
+
         if viewer_email and query.strip() != st.session_state.get("last_logged_query"):
             st.session_state.last_logged_query = query.strip()
             user_data.add_history_entry(
@@ -1519,13 +1555,20 @@ if view == "search":
                 category=category_label if category_label != "All categories" else None,
                 scope_filename=scope_label if scope_label != "All documents" else None,
             )
- 
+
         # Invisible marker the hands-free voice script polls for (it can't
         # listen for "the Python script re-ran", so it watches this
         # instead): a token that changes on every search, plus a
         # ready-to-speak summary of what was found. See the big comment
         # above _VOICE_HTML for why this has to be poll-based.
-        st.session_state.voice_result_seq = st.session_state.get("voice_result_seq", 0) + 1
+        # Only a new search (different query / category / scope) gets a new
+        # token. Before, every rerun with a query in the box -- clicking
+        # Preview, paging, starring -- bumped it, so the voice script read the
+        # same results aloud again on every click.
+        _voice_key = (query.strip(), category_label, scope_label)
+        if st.session_state.get("voice_last_key") != _voice_key:
+            st.session_state.voice_last_key = _voice_key
+            st.session_state.voice_result_seq = st.session_state.get("voice_result_seq", 0) + 1
         if hits:
             top = hits[0]
             doc_word = "document" if doc_count == 1 else "documents"
@@ -1542,7 +1585,7 @@ if view == "search":
             f"data-say=\"{html.escape(voice_say)}\" style='display:none;'></div>",
             unsafe_allow_html=True,
         )
- 
+
         if not hits:
             st.info("No matching pages found. Try a different phrasing or check the synonym list.")
         for result_index, hit in enumerate(hits):
@@ -1631,7 +1674,7 @@ if view == "search":
                     """,
                     unsafe_allow_html=True,
                 )
- 
+
     # -----------------------------------------------------------------
     # Library management
     # -----------------------------------------------------------------
@@ -1640,7 +1683,7 @@ if view == "search":
             st.session_state.uploader_key = 0
         if "last_uploaded_signature" not in st.session_state:
             st.session_state.last_uploaded_signature = None
- 
+
         upload_col, category_col = st.columns([3, 1])
         with upload_col:
             uploaded = st.file_uploader(
@@ -1650,7 +1693,7 @@ if view == "search":
             )
         with category_col:
             upload_category = st.selectbox("Category", CATEGORY_NAMES, key="upload_category")
- 
+
         if uploaded is not None:
             data = uploaded.getvalue()
             signature = (uploaded.name, len(data))
@@ -1660,7 +1703,7 @@ if view == "search":
                 pass
             else:
                 import pymupdf as fitz
- 
+
                 with _shared_locks()["fitz"]:  # PyMuPDF isn't thread-safe
                     doc = fitz.open(stream=data, filetype="pdf")
                     pages = [
@@ -1690,7 +1733,7 @@ if view == "search":
                         st.session_state.uploader_key += 1
                         st.success(f"Indexed {uploaded.name} ({len(pages)} pages, tagged '{upload_category}').")
                         st.rerun()
- 
+
         for d in docs:
             row1, row2, row3 = st.columns([3, 2, 1])
             row1.write(d["filename"])
@@ -1733,7 +1776,7 @@ if view == "search":
                     )
                 else:
                     st.rerun()
- 
+
         # -----------------------------------------------------------------
         # Rebuild search index from Drive
         #
@@ -1769,7 +1812,7 @@ if view == "search":
         if st.button("🔄 Rebuild search index from Drive", key="rebuild_index_btn"):
             st.session_state.rebuild_index_requested = True
             st.rerun()
- 
+
         if st.session_state.get("rebuild_index_requested"):
             old_category_by_filename = {d["filename"]: d.get("category", "Uncategorized") for d in docs}
             try:
@@ -1803,7 +1846,7 @@ if view == "search":
                     tmp_path = None
                     try:
                         import pymupdf as fitz
- 
+
                         # To disk, not into memory -- see
                         # DriveStore.download_to_file for the numbers.
                         fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
@@ -1864,7 +1907,7 @@ if view == "search":
                             f"{len(new_records)} pages indexed."
                         )
                     st.rerun()
- 
+
 elif view == "history":
     st.markdown("<div style='font-size:22px;font-weight:700;color:#1B2440;margin-bottom:12px;'>🕐 My History</div>", unsafe_allow_html=True)
     if not viewer_email:
@@ -1876,7 +1919,7 @@ elif view == "history":
         else:
             for i, entry in enumerate(history):
                 _render_history_row(entry, "myhist", i)
- 
+
 elif view == "favorites":
     st.markdown("<div style='font-size:22px;font-weight:700;color:#1B2440;margin-bottom:12px;'>☆ Favorites</div>", unsafe_allow_html=True)
     if not viewer_email:
@@ -1905,7 +1948,7 @@ elif view == "favorites":
                     if st.button("★ Remove from favorites", key=f"unfav_{widget_id}"):
                         user_data.toggle_favorite(store, viewer_email, fav["doc_id"], fav["filename"], fav["page_number"])
                         st.rerun()
- 
+
 elif view == "about":
     st.markdown("<div style='font-size:22px;font-weight:700;color:#1B2440;margin-bottom:12px;'>ℹ️ About</div>", unsafe_allow_html=True)
     with st.container(border=True):
@@ -1914,34 +1957,34 @@ elif view == "about":
             **Technical Manual Search** indexes every PDF service manual in the shared
             Google Drive library so anyone on the team can find the right page by
             keyword or by voice, instead of opening manuals one at a time.
- 
+
             **Categories** — each uploaded manual is tagged as one of: """
             + ", ".join(f"{m['icon']} {name}" for name, m in CATEGORY_META.items())
             + """. Use the category cards or the Category filter on the Search page to
             browse by type.
- 
+
             **My History / Favorites** — enter your name in the sidebar (under the
             navigation) to get a private, per-person search history and a list of
             starred pages, saved alongside the shared library under that name.
             It's not a real login (nothing stops someone from typing a colleague's
             name), so please only use your own name -- everyone's history and
             favorites stay separate as long as everyone does.
- 
+
             **Adding or removing documents** — anyone with access to this app can
             upload or delete PDFs from the Document library (bottom of the Search
             page); uploads go into the same shared Drive folder for everyone.
- 
+
             **Access** — this app is restricted to specific Horizon email addresses.
             To be added, or if something looks broken, contact
             technical.support@horizon.co.jp.
             """
         )
- 
+
     with st.container(border=True):
         st.markdown(
             """
             **System architecture & software**
- 
+
             - **Web app**: built with Streamlit, an open-source Python web app framework.
             - **Hosting**: runs on Streamlit Community Cloud (free hosting); the source
               code lives in a GitHub repo, and pushing changes redeploys the app
@@ -1952,9 +1995,9 @@ elif view == "about":
             - **Search engine**: uses TF-IDF, a standard text-matching algorithm that
               runs entirely inside the app. No external AI service is used, and manual
               content is never sent to a third party.
- 
+
             **Security**
- 
+
             - **Access control**: Streamlit Community Cloud is configured to let only
               specific email addresses open this app.
             - **File permissions**: documents live in the company's Google Drive, so
@@ -1963,15 +2006,15 @@ elif view == "about":
             - **Credentials**: the Google Drive connection credentials are stored
               encrypted on Streamlit's side and never appear in the source code.
             - **Encryption**: all traffic is served over HTTPS.
- 
+
             **Where files are stored**
- 
+
             All PDFs, the search index, and everyone's search history/favorites live in
             the company's shared Google Drive folder — the single source of truth. The
             app itself doesn't persist any files, so nothing is lost even if it restarts.
             """
         )
- 
+
     # Japanese translations of the two boxes above, for colleagues who read
     # this page in Japanese -- kept as separate boxes (rather than replacing
     # the English text) so both languages stay available on the same page.
@@ -1981,34 +2024,34 @@ elif view == "about":
             **Technical Manual Search** は、共有 Google Drive 上のすべての PDF サービス
             マニュアルを検索対象とし、チームの誰もがキーワードや音声で目的のページをすぐに
             見つけられるようにするツールです。マニュアルを一つずつ開いて探す必要がなくなります。
- 
+
             **カテゴリ** — アップロードされた各マニュアルは、次のいずれかに分類されます：
             🔧 Service Manual（整備マニュアル）、⚙️ Parts Book（パーツブック）、
             📄 Specifications（仕様書）、⚠️ Error Code（エラーコード）、
             📖 Procedure（作業手順）、🔗 Installation（設置）。検索ページのカテゴリカード、
             またはカテゴリフィルターで種類ごとに絞り込めます。
- 
+
             **マイ履歴 / お気に入り** — サイドバー（ナビゲーションの下）に自分の名前を
             入力すると、検索履歴とお気に入りページの一覧が、その名前のもとで個人ごとに
             保存されます。正式なログインではないため（他の人の名前を入力することも技術的
             には可能です）、必ずご自身の名前をご入力ください。全員がそうすることで、
             各自の履歴とお気に入りが分離された状態を保てます。
- 
+
             **資料の追加・削除** — このアプリにアクセスできる人は誰でも、検索ページ下部の
             「Document library」から PDF をアップロード・削除できます。アップロードされた
             ファイルは全員共通の Drive フォルダに保存されます。
- 
+
             **アクセス** — 本アプリは Horizon の特定のメールアドレスのみに利用が制限されて
             います。追加登録が必要な場合や、不具合を見つけた場合は
             technical.support@horizon.co.jp までご連絡ください。
             """
         )
- 
+
     with st.container(border=True):
         st.markdown(
             """
             **システム構成・使用ソフトウェアについて**
- 
+
             - **Webアプリの基盤**：Streamlit（Pythonで作られたオープンソースのWebアプリ
               開発ツール）を使用しています。
             - **ホスティング**：Streamlit公式の無料クラウドサービス（Streamlit Community
@@ -2020,9 +2063,9 @@ elif view == "about":
             - **検索アルゴリズム**：TF-IDFというテキスト検索の基本的なアルゴリズムを使用
               しており、処理はアプリ内部で完結します。外部のAIサービスは一切使用しておらず、
               マニュアルの内容が第三者に送信されることもありません。
- 
+
             **セキュリティについて**
- 
+
             - **アクセス制限**：Streamlit Community Cloud側で「指定したメールアドレスのみ
               アクセス可能」という設定を行っており、許可リストに登録された社員のみが本ア
               プリのURLを開くことができます。
@@ -2032,14 +2075,12 @@ elif view == "about":
             - **認証情報**：Google Driveへの接続に使用する認証情報は、Streamlit側で暗号化
               保存されており、ソースコード上には表示されません。
             - **通信の暗号化**：通信はHTTPSで暗号化されています。
- 
+
             **ファイルの保存場所について**
- 
+
             PDFマニュアル、検索インデックス、各自の検索履歴・お気に入りは、すべて会社の
             Google Drive共有フォルダに保存されており、これが唯一のデータ保管場所です。
             本アプリ自体はファイルを永続的に保持しないため、再起動してもデータが失われる
             ことはありません。
             """
         )
- 
-
